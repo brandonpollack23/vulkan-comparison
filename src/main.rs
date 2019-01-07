@@ -11,15 +11,17 @@ use ash::{
 };
 use std::ffi::CStr;
 use std::str;
+use std::os::raw::c_char;
 use winit::{dpi::LogicalSize, Event, EventsLoop, Window, WindowBuilder, WindowEvent};
-use std::borrow::Borrow;
 
-const TITLE: &'static [u8] = b"Vulkan";
+const TITLE_BYTES: &'static [u8] = b"Vulkan";
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 
-const VALIDATION_LAYERS: &'static [&'static [u8]] = &[b"VK_LAYER_LUNARG_standard_validation"];
+const VALIDATION_LAYERS_CSTR: &'static [&'static [u8]] = &[b"VK_LAYER_LUNARG_standard_validation\0"];
 
+// If the compiler is in debug mode, enable validation layers so we can do extra checks, print debug messages, etc.
+// By default, Vulkan does not do any kind of helping and validation, but these plugins will add that back in and be gone during a release build. Juicy.
 #[cfg(debug_assertions)]
 const ENABLE_VALIDATION_LAYERS: bool = true;
 #[cfg(not(debug_assertions))]
@@ -43,18 +45,16 @@ struct CallbackStructures {
   debug_callback_structure: vk::DebugUtilsMessengerEXT,
 }
 
-// Have to manually deallocate (vkDestroyInstance) etc.
+// Have to manually deallocate (vkDestroyInstance, destroy debug utils) etc.
 impl Drop for VulkanStructures {
   fn drop(&mut self) {
     unsafe {
-      match self.callback_structures {
-        Some(ref inner) => {
-          inner.debug_utils_extension.destroy_debug_utils_messenger_ext(inner.debug_callback_structure, None);
-          ()
-        }
-        _ => (),
+      // Destroy debug extension.
+      if let Some(inner) = self.callback_structures.as_mut() {
+        inner.debug_utils_extension.destroy_debug_utils_messenger_ext(inner.debug_callback_structure, None);
       }
 
+      // Destroy Vulkan instance.
       self.instance.destroy_instance(None);
     }
   }
@@ -65,7 +65,7 @@ impl HelloTriangleApplication {
     // Event loop and window presented by the host platform.
     let events_loop = EventsLoop::new();
     let window = WindowBuilder::new()
-      .with_title(str::from_utf8(TITLE).unwrap())
+      .with_title(str::from_utf8(TITLE_BYTES).unwrap())
       .with_dimensions(LogicalSize::new(f64::from(WIDTH), f64::from(HEIGHT)))
       .with_resizable(false)
       .build(&events_loop)
@@ -87,6 +87,8 @@ impl HelloTriangleApplication {
     Self::print_supported_extensions(&entry);
 
     let instance = Self::create_instance(&entry);
+
+    // Set up debug callback, so we can get messages through the Vulkan runtime (via Rust FFI).
     let callback_structures = Self::setup_debug_callback(&entry, &instance);
 
     let vulkan_structures = VulkanStructures {
@@ -105,12 +107,17 @@ impl HelloTriangleApplication {
     // In order for Vulkan to render to a window, an extension needs to be loaded
     // specific for the platform. This code is copied from here: https://github.com/MaikKlein/ash/blob/master/examples/src/lib.rs
     // Debug report is included in these extension names.
-    let extension_names_raw = extension_names();
+    let mut extension_names_raw = extension_names();
+
+      // Here we check if we are in debug mode, if so load the extensions for debugging, such as DebugUtilsMessenger.
+    if ENABLE_VALIDATION_LAYERS {
+      let extension_names_all = extension_names_raw.push(ash::extensions::DebugUtils::name().as_ptr());
+    }
 
     // Various function calls in here are unsafe, creation of the instance, and
     // working with cstrings unchecked.
     unsafe {
-      let name = CStr::from_bytes_with_nul_unchecked(TITLE);
+      let name = CStr::from_bytes_with_nul_unchecked(TITLE_BYTES);
       // First create application info. s_type is handled by the builder's defaults in
       // all cases in ash (rust vulkan bindings with a little sauce). next being null
       // is also handled by the builder.
@@ -127,8 +134,8 @@ impl HelloTriangleApplication {
       let create_info = vk::InstanceCreateInfo::builder()
         .application_info(&app_info)
         .enabled_extension_names(&extension_names_raw[..])
-        .enabled_layer_names(std::mem::transmute::<&[&[u8]], &[*const i8]>(
-          VALIDATION_LAYERS,
+        .enabled_layer_names(std::mem::transmute::<&[&[u8]], &[*const c_char]>(
+          VALIDATION_LAYERS_CSTR,
         ))
         .build();
 
@@ -140,9 +147,11 @@ impl HelloTriangleApplication {
   }
 
   fn validate_layers_exist(layer_properties: &Vec<vk::LayerProperties>) {
-    for &enabled_layer in VALIDATION_LAYERS {
-      let search_layer = str::from_utf8(enabled_layer).unwrap();
-      Self::validate_layer_exists(layer_properties, search_layer);
+    for &enabled_layer in VALIDATION_LAYERS_CSTR {
+      unsafe {
+        let search_layer = CStr::from_ptr(enabled_layer.as_ptr() as *const c_char).to_str().unwrap();
+        Self::validate_layer_exists(layer_properties, search_layer);
+      }
     }
   }
 
@@ -157,7 +166,7 @@ impl HelloTriangleApplication {
       }
     }
 
-    panic!("No such layer {}", search_layer);
+    panic!("No such layer {}",  search_layer);
   }
 
   fn print_supported_extensions(entry: &Entry) {
@@ -178,22 +187,25 @@ impl HelloTriangleApplication {
       return None;
     }
 
-    let debug_utils_messenger_create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
-      .message_severity(
-        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
-          | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-          | vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE,
-      )
-      .message_type(
-        vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-          | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-          | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
-      )
-      .pfn_user_callback(Some(debug_callback))
-      .build();
-
+    // Load up the function pointers so we can use the functions to create.
     let debug_utils_extension = ash::extensions::DebugUtils::new(entry, instance);
+
+    // I want all the message types and levels here (Except Info).  Also specify the callback function.
+    let debug_utils_messenger_create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
+        .message_severity(
+          vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+              | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+              | vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE,
+        )
+        .message_type(
+          vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+              | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+              | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+        )
+        .pfn_user_callback(Some(debug_callback))
+        .build();
     unsafe {
+      // Build it using the function loaded above.
       let debug_callback_structure = debug_utils_extension
         .create_debug_utils_messenger_ext(&debug_utils_messenger_create_info, None)
         .expect("Could not create debug utils message extension callback");
