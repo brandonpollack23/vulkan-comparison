@@ -10,15 +10,16 @@ use ash::{
   Instance,
 };
 use std::ffi::CStr;
-use std::str;
 use std::os::raw::c_char;
+use std::str;
 use winit::{dpi::LogicalSize, Event, EventsLoop, Window, WindowBuilder, WindowEvent};
 
 const TITLE_BYTES: &'static [u8] = b"Vulkan";
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 
-const VALIDATION_LAYERS_CSTR: &'static [&'static [u8]] = &[b"VK_LAYER_LUNARG_standard_validation\0"];
+const VALIDATION_LAYERS_CSTR: &'static [&'static [u8]] =
+  &[b"VK_LAYER_LUNARG_standard_validation\0"];
 
 // If the compiler is in debug mode, enable validation layers so we can do extra checks, print debug messages, etc.
 // By default, Vulkan does not do any kind of helping and validation, but these plugins will add that back in and be gone during a release build. Juicy.
@@ -45,21 +46,6 @@ struct CallbackStructures {
   debug_callback_structure: vk::DebugUtilsMessengerEXT,
 }
 
-// Have to manually deallocate (vkDestroyInstance, destroy debug utils) etc.
-impl Drop for VulkanStructures {
-  fn drop(&mut self) {
-    unsafe {
-      // Destroy debug extension.
-      if let Some(inner) = self.callback_structures.as_mut() {
-        inner.debug_utils_extension.destroy_debug_utils_messenger_ext(inner.debug_callback_structure, None);
-      }
-
-      // Destroy Vulkan instance.
-      self.instance.destroy_instance(None);
-    }
-  }
-}
-
 impl HelloTriangleApplication {
   pub fn initialize() -> Self {
     // Event loop and window presented by the host platform.
@@ -71,31 +57,8 @@ impl HelloTriangleApplication {
       .build(&events_loop)
       .expect("Error Creating Window");
 
-    // Entry is the vulkan library loader, it loads the vulkan shared object
-    // (dll/so/etc), and then loads all the function pointers for vulkan versions
-    // 1.0 and 1.1 from that.
-    let entry: Entry = Entry::new().unwrap();
+    let vulkan_structures = Self::initialize_vulkan();
 
-    if ENABLE_VALIDATION_LAYERS {
-      Self::validate_layers_exist(
-        &entry
-          .enumerate_instance_layer_properties()
-          .expect("Could not enumerate layer properties"),
-      );
-    }
-
-    Self::print_supported_extensions(&entry);
-
-    let instance = Self::create_instance(&entry);
-
-    // Set up debug callback, so we can get messages through the Vulkan runtime (via Rust FFI).
-    let callback_structures = Self::setup_debug_callback(&entry, &instance);
-
-    let vulkan_structures = VulkanStructures {
-      entry,
-      instance,
-      callback_structures,
-    };
     Self {
       window,
       events_loop,
@@ -103,16 +66,25 @@ impl HelloTriangleApplication {
     }
   }
 
-  fn create_instance(entry: &Entry) -> Instance {
-    // In order for Vulkan to render to a window, an extension needs to be loaded
-    // specific for the platform. This code is copied from here: https://github.com/MaikKlein/ash/blob/master/examples/src/lib.rs
-    // Debug report is included in these extension names.
-    let mut extension_names_raw = extension_names();
+  fn initialize_vulkan() -> VulkanStructures {
+    // Entry is the vulkan library loader, it loads the vulkan shared object
+    // (dll/so/etc), and then loads all the function pointers for vulkan versions
+    // 1.0 and 1.1 from that.
+    let entry: Entry = Entry::new().expect("Unable to load Vulkan dll and functions!");
+    // Create the Vulkan instance (ie instantiate the client side driver).
+    let instance = Self::create_instance(&entry);
+    // Set up debug callback, so we can get messages through the Vulkan runtime (via Rust FFI).
+    let callback_structures = Self::setup_debug_callback(&entry, &instance);
+    let vulkan_structures = VulkanStructures {
+      entry,
+      instance,
+      callback_structures,
+    };
+    vulkan_structures
+  }
 
-      // Here we check if we are in debug mode, if so load the extensions for debugging, such as DebugUtilsMessenger.
-    if ENABLE_VALIDATION_LAYERS {
-      let extension_names_all = extension_names_raw.push(ash::extensions::DebugUtils::name().as_ptr());
-    }
+  fn create_instance(entry: &Entry) -> Instance {
+    let extension_names_raw = Self::get_extension_names(&entry);
 
     // Various function calls in here are unsafe, creation of the instance, and
     // working with cstrings unchecked.
@@ -134,9 +106,11 @@ impl HelloTriangleApplication {
       let create_info = vk::InstanceCreateInfo::builder()
         .application_info(&app_info)
         .enabled_extension_names(&extension_names_raw[..])
-        .enabled_layer_names(std::mem::transmute::<&[&[u8]], &[*const c_char]>(
-          VALIDATION_LAYERS_CSTR,
-        ))
+        .enabled_layer_names(if ENABLE_VALIDATION_LAYERS {
+          std::mem::transmute::<&[&[u8]], &[*const c_char]>(VALIDATION_LAYERS_CSTR)
+        } else {
+          &[]
+        })
         .build();
 
       let instance = entry
@@ -146,10 +120,47 @@ impl HelloTriangleApplication {
     }
   }
 
+  fn get_extension_names(entry: &Entry) -> Vec<*const c_char> {
+    Self::print_supported_extensions(&entry);
+
+    // In order for Vulkan to render to a window, an extension needs to be loaded
+    // specific for the platform. This code is copied from here: https://github.com/MaikKlein/ash/blob/master/examples/src/lib.rs
+    // Debug report is included in these extension names.
+    let mut extension_names_raw = extension_names();
+
+    // Here we check if we are in debug mode, if so load the extensions for debugging, such as DebugUtilsMessenger.
+    if ENABLE_VALIDATION_LAYERS {
+      Self::validate_layers_exist(
+        &entry
+          .enumerate_instance_layer_properties()
+          .expect("Could not enumerate layer properties"),
+      );
+
+      extension_names_raw.push(ash::extensions::DebugUtils::name().as_ptr());
+    }
+
+    extension_names_raw
+  }
+
+  fn print_supported_extensions(entry: &Entry) {
+    println!("Supported extensions are:");
+    for extension in entry
+      .enumerate_instance_extension_properties()
+      .expect("Could not enumerate extensions!")
+      {
+        println!("{}", unsafe {
+          // All this ceremony is to treat an unsafe cstr buffer as a printable string.
+          str::from_utf8(CStr::from_ptr(extension.extension_name.as_ptr()).to_bytes()).unwrap()
+        });
+      }
+  }
+
   fn validate_layers_exist(layer_properties: &Vec<vk::LayerProperties>) {
     for &enabled_layer in VALIDATION_LAYERS_CSTR {
       unsafe {
-        let search_layer = CStr::from_ptr(enabled_layer.as_ptr() as *const c_char).to_str().unwrap();
+        let search_layer = CStr::from_ptr(enabled_layer.as_ptr() as *const c_char)
+          .to_str()
+          .unwrap();
         Self::validate_layer_exists(layer_properties, search_layer);
       }
     }
@@ -166,20 +177,7 @@ impl HelloTriangleApplication {
       }
     }
 
-    panic!("No such layer {}",  search_layer);
-  }
-
-  fn print_supported_extensions(entry: &Entry) {
-    println!("Supported extensions are:");
-    for extension in entry
-      .enumerate_instance_extension_properties()
-      .expect("Could not enumerate extensions!")
-    {
-      println!("{}", unsafe {
-        // All this ceremony is to treat an unsafe cstr buffer as a printable string.
-        str::from_utf8(CStr::from_ptr(extension.extension_name.as_ptr()).to_bytes()).unwrap()
-      });
-    }
+    panic!("No such layer {}", search_layer);
   }
 
   fn setup_debug_callback(entry: &Entry, instance: &Instance) -> Option<CallbackStructures> {
@@ -192,18 +190,18 @@ impl HelloTriangleApplication {
 
     // I want all the message types and levels here (Except Info).  Also specify the callback function.
     let debug_utils_messenger_create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
-        .message_severity(
-          vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
-              | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-              | vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE,
-        )
-        .message_type(
-          vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-              | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-              | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
-        )
-        .pfn_user_callback(Some(debug_callback))
-        .build();
+      .message_severity(
+        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+          | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+          | vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE,
+      )
+      .message_type(
+        vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+          | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+          | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+      )
+      .pfn_user_callback(Some(debug_callback))
+      .build();
     unsafe {
       // Build it using the function loaded above.
       let debug_callback_structure = debug_utils_extension
@@ -215,7 +213,6 @@ impl HelloTriangleApplication {
         debug_callback_structure,
       })
     }
-
   }
 
   fn main_loop(&mut self) {
@@ -232,6 +229,23 @@ impl HelloTriangleApplication {
       if done {
         return;
       }
+    }
+  }
+}
+
+// Have to manually deallocate (vkDestroyInstance, destroy debug utils) etc.
+impl Drop for VulkanStructures {
+  fn drop(&mut self) {
+    unsafe {
+      // Destroy debug extension.
+      if let Some(inner) = self.callback_structures.as_mut() {
+        inner
+          .debug_utils_extension
+          .destroy_debug_utils_messenger_ext(inner.debug_callback_structure, None);
+      }
+
+      // Destroy Vulkan instance.
+      self.instance.destroy_instance(None);
     }
   }
 }
