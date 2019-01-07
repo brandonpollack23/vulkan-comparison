@@ -50,8 +50,9 @@ impl Drop for VulkanStructures {
   fn drop(&mut self) {
     unsafe {
       // Destroy debug extension.
-      let mut inner = self.callback_structures.as_mut().unwrap();
-      inner.debug_utils_extension.destroy_debug_utils_messenger_ext(inner.debug_callback_structure, None);
+      if let Some(inner) = self.callback_structures.as_mut() {
+        inner.debug_utils_extension.destroy_debug_utils_messenger_ext(inner.debug_callback_structure, None);
+      }
 
       // Destroy Vulkan instance.
       self.instance.destroy_instance(None);
