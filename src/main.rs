@@ -39,6 +39,7 @@ struct VulkanStructures {
   entry: Entry, // Function loader.
   instance: Instance,
   callback_structures: Option<CallbackStructures>,
+  physical_devices: Vec<vk::PhysicalDevice>, // TODO needed?
 }
 
 struct CallbackStructures {
@@ -71,14 +72,20 @@ impl HelloTriangleApplication {
     // (dll/so/etc), and then loads all the function pointers for vulkan versions
     // 1.0 and 1.1 from that.
     let entry: Entry = Entry::new().expect("Unable to load Vulkan dll and functions!");
+
     // Create the Vulkan instance (ie instantiate the client side driver).
     let instance = Self::create_instance(&entry);
+
     // Set up debug callback, so we can get messages through the Vulkan runtime (via Rust FFI).
     let callback_structures = Self::setup_debug_callback(&entry, &instance);
+
+    let physical_devices = Self::get_physical_devices(&instance);
+
     let vulkan_structures = VulkanStructures {
       entry,
       instance,
       callback_structures,
+      physical_devices,
     };
     vulkan_structures
   }
@@ -147,12 +154,12 @@ impl HelloTriangleApplication {
     for extension in entry
       .enumerate_instance_extension_properties()
       .expect("Could not enumerate extensions!")
-      {
-        println!("{}", unsafe {
-          // All this ceremony is to treat an unsafe cstr buffer as a printable string.
-          str::from_utf8(CStr::from_ptr(extension.extension_name.as_ptr()).to_bytes()).unwrap()
-        });
-      }
+    {
+      println!("{}", unsafe {
+        // All this ceremony is to treat an unsafe cstr buffer as a printable string.
+        str::from_utf8(CStr::from_ptr(extension.extension_name.as_ptr()).to_bytes()).unwrap()
+      });
+    }
   }
 
   fn validate_layers_exist(layer_properties: &Vec<vk::LayerProperties>) {
@@ -215,6 +222,46 @@ impl HelloTriangleApplication {
     }
   }
 
+  fn get_physical_devices(&instance: &Instance) -> Vec<vk::PhysicalDevice> {
+    unsafe {
+      let devices = instance
+        .enumerate_physical_devices()
+        .expect("Unable to enumerate devices");
+
+      println!("\nEnumerating your devices...");
+      let suitable_devices = devices
+        .iter()
+        .filter(|device| Self::is_device_suitable(&instance, device))
+        .collect();
+
+      // TODO make sure you allocate exact right size for vec
+      suitable_devices
+    }
+  }
+
+  fn is_device_suitable(instance: &Instance, device: &vk::PhysicalDevice) -> bool {
+    unsafe {
+      let device_properties = instance.get_physical_device_properties(*device);
+      let gpu_type = match device_properties.device_type {
+        vk::PhysicalDeviceType::DISCRETE_GPU => "Discrete",
+        vk::PhysicalDeviceType::INTEGRATED_GPU => "Integrated",
+        vk::PhysicalDeviceType::CPU => "CPU-type",
+        vk::PhysicalDeviceType::VIRTUAL_GPU => "Virtual",
+        _ => "other",
+      };
+
+      let device_features = instance.get_physical_device_features(*device);
+
+      println!(
+        "Device Found: {}, type: {}, it supports the following features\n{:?}",
+        str::from_utf8(CStr::from_ptr(device_properties.device_name.as_ptr()).to_bytes()).unwrap(),
+        gpu_type,
+        device_features
+      );
+    }
+    return true;
+  }
+
   fn main_loop(&mut self) {
     loop {
       let mut done = false;
@@ -234,6 +281,7 @@ impl HelloTriangleApplication {
 }
 
 // Have to manually deallocate (vkDestroyInstance, destroy debug utils) etc.
+// Devices are cleaned up when the instance is destroyed, so no need to do that manually.
 impl Drop for VulkanStructures {
   fn drop(&mut self) {
     unsafe {
