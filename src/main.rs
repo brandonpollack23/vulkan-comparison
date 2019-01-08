@@ -81,6 +81,9 @@ impl HelloTriangleApplication {
 
     let physical_devices = Self::get_physical_devices(&instance);
 
+    // TODO for now just use the first one, who cares right?  In the future a scoring system could
+    // be used, or a user selection, but anything works atm.
+
     let vulkan_structures = VulkanStructures {
       entry,
       instance,
@@ -234,7 +237,9 @@ impl HelloTriangleApplication {
         .filter(|device| Self::is_device_suitable(instance, device))
         .collect();
 
-      suitable_devices.iter().for_each(|device| Self::print_device_information(instance, device));
+      suitable_devices
+        .iter()
+        .for_each(|device| Self::print_device_information(instance, device));
 
       suitable_devices.shrink_to_fit();
       suitable_devices
