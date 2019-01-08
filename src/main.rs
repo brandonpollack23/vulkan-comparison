@@ -222,19 +222,19 @@ impl HelloTriangleApplication {
     }
   }
 
-  fn get_physical_devices(&instance: &Instance) -> Vec<vk::PhysicalDevice> {
+  fn get_physical_devices(instance: &Instance) -> Vec<vk::PhysicalDevice> {
     unsafe {
       let devices = instance
         .enumerate_physical_devices()
         .expect("Unable to enumerate devices");
 
       println!("\nEnumerating your devices...");
-      let suitable_devices = devices
-        .iter()
-        .filter(|device| Self::is_device_suitable(&instance, device))
+      let mut suitable_devices:Vec<vk::PhysicalDevice> = devices
+        .into_iter()
+        .filter(|device| Self::is_device_suitable(instance, device))
         .collect();
 
-      // TODO make sure you allocate exact right size for vec
+      suitable_devices.shrink_to_fit();
       suitable_devices
     }
   }
