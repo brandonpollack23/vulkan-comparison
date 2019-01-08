@@ -2,10 +2,12 @@ mod raw_vulkan_helpers;
 
 use crate::raw_vulkan_helpers::*;
 use ash::{
+  version::DeviceV1_0,   //Needed for methods on Device
   version::EntryV1_0,    // Needed for methods on Entry.
-  version::InstanceV1_0, // Needed for methods on instance.
+  version::InstanceV1_0, // Needed for methods on Instance.
   vk,
   vk_make_version,
+  Device,
   Entry,
   Instance,
 };
@@ -39,6 +41,7 @@ struct VulkanStructures {
   entry: Entry, // Function loader.
   instance: Instance,
   callback_structures: Option<CallbackStructures>,
+  logical_device: Device,
 }
 
 struct CallbackStructures {
@@ -78,16 +81,27 @@ impl HelloTriangleApplication {
     // Set up debug callback, so we can get messages through the Vulkan runtime (via Rust FFI).
     let callback_structures = Self::setup_debug_callback(&entry, &instance);
 
-    let physical_devices = Self::get_physical_devices(&instance);
-
     // For now just use the first one, who cares right?  In the future a scoring system could be
     // used, or a user selection, but anything works atm.
-    let physical_device = physical_devices[0];
+    let physical_device = Self::get_physical_devices(&instance)[0];
+
+    // Right now no features are requested, but this will be different by the end of the tutorial.
+    // Later this will include things like vertex shader, geometry shader, etc.
+    let (logical_device, queue_family_indices) = Self::create_logical_device(
+      &instance,
+      &physical_device,
+      &vk::PhysicalDeviceFeatures::builder().build(),
+    );
+
+    let device_graphics_queue = unsafe {
+      logical_device.get_device_queue(queue_family_indices.graphics_queue_family.unwrap(), 0u32)
+    };
 
     let vulkan_structures = VulkanStructures {
       entry,
       instance,
       callback_structures,
+      logical_device,
     };
     vulkan_structures
   }
@@ -248,7 +262,7 @@ impl HelloTriangleApplication {
   fn is_device_suitable(instance: &Instance, device: &vk::PhysicalDevice) -> bool {
     // This is such a basic application (read: I have no idea what I'm doing) that anything that
     // supports vulkan and the queue families we need is fine.
-    Self::find_queue_families(instance, device, vk::QueueFlags::GRAPHICS).is_complete()
+    Self::find_queue_families(instance, device).is_complete()
   }
 
   // In Vulkan, there are different types of queues that come from different types of queue families.
@@ -257,17 +271,15 @@ impl HelloTriangleApplication {
   fn find_queue_families(
     instance: &Instance,
     device: &vk::PhysicalDevice,
-    needed_queues: vk::QueueFlags,
-  ) -> QueueFamilyIndices {
-    let mut queue_family_indices = QueueFamilyIndices::default();
+  ) -> HelloTriangeNeededQueueFamilyIndices {
+    let mut queue_family_indices = HelloTriangeNeededQueueFamilyIndices::default();
     unsafe {
       let queue_families = instance.get_physical_device_queue_family_properties(*device);
-      for queue_family in queue_families.iter() {
+      for (i, queue_family) in queue_families.iter().enumerate() {
         if queue_family.queue_count > 0
-          && needed_queues.contains(vk::QueueFlags::GRAPHICS)
           && queue_family.queue_flags.contains(vk::QueueFlags::GRAPHICS)
         {
-          queue_family_indices.graphics_queue_family = Some(queue_family.queue_flags);
+          queue_family_indices.graphics_queue_family = Some(i as u32);
         }
 
         // All the needed queues have been found.
@@ -302,6 +314,51 @@ impl HelloTriangleApplication {
     }
   }
 
+  // Return a logical device for the given physical device, with the necessary features.
+  fn create_logical_device(
+    instance: &Instance,
+    device: &vk::PhysicalDevice,
+    features: &vk::PhysicalDeviceFeatures,
+  ) -> (Device, HelloTriangeNeededQueueFamilyIndices) {
+    let queue_family_indices = Self::find_queue_families(instance, device);
+
+    if !queue_family_indices.is_complete() {
+      panic!(
+        "Trying to create a physical device with queue families that are not supported! {:?}",
+        queue_family_indices
+      )
+    }
+
+    // Here we specify all the queue types we'll need in our device, as of right now that's just
+    // graphics.
+    let graphics_queue_creation_info = vk::DeviceQueueCreateInfo::builder()
+      .queue_family_index(queue_family_indices.graphics_queue_family.unwrap())
+      .queue_priorities(&[1.0])
+      .build();
+
+    // Here we create the actual device!  No extensions (not even VK_KHR_swapchain, which is needed
+    // to draw to a window) are needed at this stage, but will be added when needed in the future.
+    let device_create_info = vk::DeviceCreateInfo::builder()
+      .queue_create_infos(&[graphics_queue_creation_info])
+      .enabled_features(features)
+      .enabled_extension_names(&[]) // Add extensions here!
+      .enabled_layer_names(if ENABLE_VALIDATION_LAYERS {
+        unsafe { std::mem::transmute::<&[&[u8]], &[*const c_char]>(VALIDATION_LAYERS_CSTR) }
+      } else {
+        &[]
+      })
+      .build();
+
+    unsafe {
+      (
+        instance
+          .create_device(*device, &device_create_info, None)
+          .expect("Could not create logical device!"),
+        queue_family_indices,
+      )
+    }
+  }
+
   fn main_loop(&mut self) {
     loop {
       let mut done = false;
@@ -321,10 +378,14 @@ impl HelloTriangleApplication {
 }
 
 // Have to manually deallocate (vkDestroyInstance, destroy debug utils) etc.
-// Devices are cleaned up when the instance is destroyed, so no need to do that manually.
+// Physical Devices are cleaned up when the instance is destroyed, so no need to do that manually.
+// Logical devices, however, are not.
 impl Drop for VulkanStructures {
   fn drop(&mut self) {
     unsafe {
+      // Destroy logical devices.
+      self.logical_device.destroy_device(None);
+
       // Destroy debug extension.
       if let Some(inner) = self.callback_structures.as_mut() {
         inner
@@ -340,12 +401,12 @@ impl Drop for VulkanStructures {
 
 // TODO reorganize files into modules time
 // A struct of all the indices of the different queue families a vulkan devices supports.
-#[derive(Default)]
-struct QueueFamilyIndices {
-  graphics_queue_family: Option<vk::QueueFlags>,
+#[derive(Default, Debug)]
+struct HelloTriangeNeededQueueFamilyIndices {
+  graphics_queue_family: Option<u32>,
 }
 
-impl QueueFamilyIndices {
+impl HelloTriangeNeededQueueFamilyIndices {
   // This set of QueueFamilyIndices has each of the tracked types of necessary queues
   // (right now it is only graphics queues, but this will change when I'm not stupid anymore).
   fn is_complete(&self) -> bool {
