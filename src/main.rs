@@ -229,10 +229,12 @@ impl HelloTriangleApplication {
         .expect("Unable to enumerate devices");
 
       println!("\nEnumerating your devices...");
-      let mut suitable_devices:Vec<vk::PhysicalDevice> = devices
+      let mut suitable_devices: Vec<vk::PhysicalDevice> = devices
         .into_iter()
         .filter(|device| Self::is_device_suitable(instance, device))
         .collect();
+
+      suitable_devices.iter().for_each(|device| Self::print_device_information(instance, device));
 
       suitable_devices.shrink_to_fit();
       suitable_devices
@@ -240,6 +242,12 @@ impl HelloTriangleApplication {
   }
 
   fn is_device_suitable(instance: &Instance, device: &vk::PhysicalDevice) -> bool {
+    // This is such a basic application (read: I have no idea what I'm doing) that anything that
+    // supports vulkan is fine.
+    return true;
+  }
+
+  fn print_device_information(instance: &Instance, device: &vk::PhysicalDevice) {
     unsafe {
       let device_properties = instance.get_physical_device_properties(*device);
       let gpu_type = match device_properties.device_type {
@@ -259,7 +267,6 @@ impl HelloTriangleApplication {
         device_features
       );
     }
-    return true;
   }
 
   fn main_loop(&mut self) {
