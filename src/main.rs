@@ -39,7 +39,6 @@ struct VulkanStructures {
   entry: Entry, // Function loader.
   instance: Instance,
   callback_structures: Option<CallbackStructures>,
-  physical_devices: Vec<vk::PhysicalDevice>, // TODO needed?
 }
 
 struct CallbackStructures {
@@ -81,14 +80,14 @@ impl HelloTriangleApplication {
 
     let physical_devices = Self::get_physical_devices(&instance);
 
-    // TODO for now just use the first one, who cares right?  In the future a scoring system could
-    // be used, or a user selection, but anything works atm.
+    // For now just use the first one, who cares right?  In the future a scoring system could be
+    // used, or a user selection, but anything works atm.
+    let physical_device = physical_devices[0];
 
     let vulkan_structures = VulkanStructures {
       entry,
       instance,
       callback_structures,
-      physical_devices,
     };
     vulkan_structures
   }
@@ -248,8 +247,32 @@ impl HelloTriangleApplication {
 
   fn is_device_suitable(instance: &Instance, device: &vk::PhysicalDevice) -> bool {
     // This is such a basic application (read: I have no idea what I'm doing) that anything that
-    // supports vulkan is fine.
-    return true;
+    // supports vulkan and the queue families we need is fine.
+    Self::find_queue_families(instance, device, vk::QueueFlags::GRAPHICS).is_complete()
+  }
+
+  // In Vulkan, there are different types of queues that come from different types of queue families.
+  // This function checks what families are supported by a vkPhysicalDevice and makes sure the
+  // device supports all we need.
+  fn find_queue_families(instance: &Instance, device: &vk::PhysicalDevice, needed_queues: vk::QueueFlags) -> QueueFamilyIndices {
+    let mut queue_family_indices = QueueFamilyIndices::default();
+    unsafe {
+      let queue_families = instance.get_physical_device_queue_family_properties(*device);
+      for queue_family in queue_families.iter() {
+        if queue_family.queue_count > 0
+          && needed_queues.contains(vk::QueueFlags::GRAPHICS)
+          && queue_family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+          queue_family_indices.graphics_queue_family = Some(queue_family.queue_flags);
+        }
+
+        // All the needed queues have been found.
+        if queue_family_indices.is_complete() {
+          break;
+        }
+      }
+    }
+
+    queue_family_indices
   }
 
   fn print_device_information(instance: &Instance, device: &vk::PhysicalDevice) {
@@ -309,6 +332,22 @@ impl Drop for VulkanStructures {
     }
   }
 }
+
+// TODO reorganize files into modules time
+// A struct of all the indices of the different queue families a vulkan devices supports.
+#[derive(Default)]
+struct QueueFamilyIndices {
+  graphics_queue_family: Option<vk::QueueFlags>,
+}
+
+impl QueueFamilyIndices {
+  // This set of QueueFamilyIndices has each of the tracked types of necessary queues
+  // (right now it is only graphics queues, but this will change when I'm not stupid anymore).
+  fn is_complete(&self) -> bool {
+    self.graphics_queue_family.is_some()
+  }
+}
+
 
 // Rust FFI, never thought I'd use this but here's a callback for errors to be
 // called from the C vulkan API.
