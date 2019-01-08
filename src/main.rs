@@ -254,14 +254,19 @@ impl HelloTriangleApplication {
   // In Vulkan, there are different types of queues that come from different types of queue families.
   // This function checks what families are supported by a vkPhysicalDevice and makes sure the
   // device supports all we need.
-  fn find_queue_families(instance: &Instance, device: &vk::PhysicalDevice, needed_queues: vk::QueueFlags) -> QueueFamilyIndices {
+  fn find_queue_families(
+    instance: &Instance,
+    device: &vk::PhysicalDevice,
+    needed_queues: vk::QueueFlags,
+  ) -> QueueFamilyIndices {
     let mut queue_family_indices = QueueFamilyIndices::default();
     unsafe {
       let queue_families = instance.get_physical_device_queue_family_properties(*device);
       for queue_family in queue_families.iter() {
         if queue_family.queue_count > 0
           && needed_queues.contains(vk::QueueFlags::GRAPHICS)
-          && queue_family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+          && queue_family.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+        {
           queue_family_indices.graphics_queue_family = Some(queue_family.queue_flags);
         }
 
@@ -347,7 +352,6 @@ impl QueueFamilyIndices {
     self.graphics_queue_family.is_some()
   }
 }
-
 
 // Rust FFI, never thought I'd use this but here's a callback for errors to be
 // called from the C vulkan API.
