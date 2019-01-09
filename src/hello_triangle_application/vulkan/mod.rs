@@ -304,9 +304,30 @@ fn is_device_suitable(
   // This is such a basic application (read: I have no idea what I'm doing) that
   // anything that supports vulkan and the queue families we need is fine.
 
-  // Presenting to a surface is a queue specific feature, so it's imporant to
-  // be sure one of the queues supports it for the device to be suitable
-  find_queue_families(instance, device, surface_structures).is_complete()
+  // Presenting to a surface is a queue specific feature, so it's important to
+  // be sure one of the queues supports it for the device to be suitable.
+  let has_queue_families = find_queue_families(instance, device, surface_structures).is_complete();
+
+  // We also need to verify the necessary extensions are supported by the physical device.
+  // Right now that's just vk_khr_swapchain.
+  let extensions_supported = unsafe {
+    instance.enumerate_device_extension_properties(*device)
+      .expect("Could not enumerate device extension properties")
+      .iter()
+      .any(|x| CStr::from_ptr(x.extension_name.as_ptr()) == extensions::Swapchain::name())
+  };
+
+  // Just because the device supports the extensions doesn't mean the surface does!
+  // Here we check if the surface supports the swapchain extension by making sure there are formats and
+  // present modes for it in the surface.
+  let swapchain_adequete = if extensions_supported {
+    let swap_chain_support = query_swapchain_support(surface_structures, device);
+    !swap_chain_support.present_modes.is_empty() && !swap_chain_support.formats.is_empty()
+  } else {
+    false
+  };
+
+  has_queue_families && extensions_supported && swapchain_adequete
 }
 
 // In Vulkan, there are different types of queues that come from different types
@@ -347,6 +368,20 @@ fn find_queue_families(
   }
 
   queue_family_indices
+}
+
+fn query_swapchain_support(surface_structures: &VulkanSurfaceStructures, device: &vk::PhysicalDevice) -> SwapChainSupportDetails {
+  unsafe {
+    let capabilities =
+      surface_structures.surface_extension.get_physical_device_surface_capabilities_khr(*device, surface_structures.surface).expect("Could not query surface capabilities");
+    let formats = surface_structures.surface_extension.get_physical_device_surface_formats_khr(*device, surface_structures.surface).expect("could not query surface formats");
+    let present_modes = surface_structures.surface_extension.get_physical_device_surface_present_modes_khr(*device, surface_structures.surface).expect("Could not query surface present modes");
+    SwapChainSupportDetails {
+      capabilities,
+      formats,
+      present_modes
+    }
+  }
 }
 
 fn print_device_information(instance: &Instance, device: &vk::PhysicalDevice) {
@@ -409,13 +444,12 @@ fn create_logical_device(
       .build();
   }
 
-  // Here we create the actual device!  No extensions (not even VK_KHR_swapchain,
-  // which is needed to draw to a window) are needed at this stage, but will
-  // be added when needed in the future.
+  // Here we create the actual device!
+  // Needed extensions are swapchain for the logical device.
   let device_create_info = vk::DeviceCreateInfo::builder()
     .queue_create_infos(queue_creation_infos.as_slice())
     .enabled_features(features)
-    .enabled_extension_names(&[]) // Add extensions here!
+    .enabled_extension_names(&[extensions::Swapchain::name().as_ptr()]) // Add extensions here!
     .enabled_layer_names(if ENABLE_VALIDATION_LAYERS {
       unsafe { std::mem::transmute::<&[&[u8]], &[*const c_char]>(VALIDATION_LAYERS_CSTR) }
     } else {
@@ -475,4 +509,11 @@ impl HelloTriangeNeededQueueFamilyIndices {
   fn is_complete(&self) -> bool {
     self.graphics_queue_family.is_some() && self.display_queue_family.is_some()
   }
+}
+
+#[derive(Debug)]
+struct SwapChainSupportDetails {
+  capabilities: vk::SurfaceCapabilitiesKHR,
+  formats: Vec<vk::SurfaceFormatKHR>,
+  present_modes: Vec<vk::PresentModeKHR>,
 }
