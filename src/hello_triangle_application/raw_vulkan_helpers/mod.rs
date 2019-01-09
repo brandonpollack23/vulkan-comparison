@@ -16,6 +16,7 @@ use ash::extensions::XlibSurface;
 
 use ash::version::{EntryV1_0, InstanceV1_0};
 use ash::vk;
+use core::mem;
 use std::ffi::c_void;
 
 // All this code was lifted shamelessly from ash's own example (don't look at
@@ -63,7 +64,7 @@ pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
     .dpy(x11_display as *mut vk::Display);
 
   let xlib_surface_loader = XlibSurface::new(entry, instance);
-  xlib_surface_loader.create_xlib_surface(&x11_create_info, None)
+  xlib_surface_loader.create_xlib_surface_khr(&x11_create_info, None)
 }
 
 #[cfg(target_os = "macos")]
@@ -97,7 +98,7 @@ pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
   };
 
   let macos_surface_loader = MacOSSurface::new(entry, instance);
-  macos_surface_loader.create_mac_os_surface_mvk(&create_info, None)
+  macos_surface_loader.create_mac_os_surface_mvk_khr(&create_info, None)
 }
 
 #[cfg(target_os = "windows")]
