@@ -39,7 +39,8 @@ pub struct VulkanStructures {
   logical_device: Device,
   graphics_queue: vk::Queue,
   present_queue: vk::Queue,
-  swapchain_structures: VulkanSwapChainStructures,
+  swap_chain_structures: VulkanSwapChainStructures,
+  swap_chain_images: Vec<vk::Image>,
 }
 
 // Each extension is wrapped in it's own struct with it's created structures to
@@ -56,8 +57,10 @@ struct VulkanSurfaceStructures {
 }
 
 struct VulkanSwapChainStructures {
-  swapchain_extension: extensions::Swapchain,
+  swap_chain_extension: extensions::Swapchain,
   swap_chain: vk::SwapchainKHR,
+  swap_chain_image_format: vk::Format,
+  swap_chain_extent: vk::Extent2D,
 }
 
 // A struct of all the indices of the different queue families a vulkan devices
@@ -95,9 +98,9 @@ impl Drop for VulkanStructures {
   fn drop(&mut self) {
     unsafe {
       self
-        .swapchain_structures
-        .swapchain_extension
-        .destroy_swapchain_khr(self.swapchain_structures.swap_chain, None);
+        .swap_chain_structures
+        .swap_chain_extension
+        .destroy_swapchain_khr(self.swap_chain_structures.swap_chain, None);
 
       self
         .surface_structures
@@ -164,14 +167,19 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
     logical_device.get_device_queue(queue_family_indices.present_queue_family.unwrap(), 0u32)
   };
 
-  let swapchain_extension = extensions::Swapchain::new(&instance, &logical_device);
-  let swapchain_structures = create_swap_chain_structures(
-    swapchain_extension,
+  let swap_chain_extension = extensions::Swapchain::new(&instance, &logical_device);
+  let swap_chain_structures = create_swap_chain_structures(
+    swap_chain_extension,
     &instance,
     &surface_structures,
     &physical_device,
     &logical_device.handle(),
   );
+
+  // Now that the swapchain is created, we take the handle to the image out of it.
+  let swap_chain_images = unsafe {
+    swap_chain_structures.swap_chain_extension.get_swapchain_images_khr(swap_chain_structures.swap_chain).expect("Could not get images out of swapchain")
+  };
 
   let vulkan_structures = VulkanStructures {
     entry,
@@ -181,7 +189,8 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
     logical_device,
     graphics_queue,
     present_queue,
-    swapchain_structures,
+    swap_chain_structures,
+    swap_chain_images
   };
   vulkan_structures
 }
@@ -623,7 +632,7 @@ fn queue_vec_already_contains_index(
 }
 
 fn create_swap_chain_structures(
-  swapchain_extension: extensions::Swapchain,
+  swap_chain_extension: extensions::Swapchain,
   instance: &Instance,
   surface_structures: &VulkanSurfaceStructures,
   physical_device: &vk::PhysicalDevice,
@@ -681,17 +690,20 @@ fn create_swap_chain_structures(
     // color and the can be clipped out.
     .old_swapchain(vk::SwapchainKHR::null())
     .image_sharing_mode(image_sharing_mode)
-    .queue_family_indices(&queue_family_indices);
+    .queue_family_indices(&queue_family_indices)
+    .surface(surface_structures.surface);
 
   let swap_chain = unsafe {
-    swapchain_extension
+    swap_chain_extension
       .create_swapchain_khr(&swap_chain_create_info_builder.build(), None)
       .expect("Could not create swapchain")
   };
 
   VulkanSwapChainStructures {
-    swapchain_extension,
+    swap_chain_extension,
     swap_chain,
+    swap_chain_image_format: surface_format.format,
+    swap_chain_extent: extent
   }
 }
 
