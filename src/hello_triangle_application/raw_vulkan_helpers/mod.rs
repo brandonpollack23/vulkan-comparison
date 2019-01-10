@@ -16,7 +16,6 @@ use ash::extensions::XlibSurface;
 
 use ash::version::{EntryV1_0, InstanceV1_0};
 use ash::vk;
-use core::mem;
 use std::ffi::c_void;
 
 // All this code was lifted shamelessly from ash's own example (don't look at

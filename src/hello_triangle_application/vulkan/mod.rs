@@ -1,4 +1,6 @@
 use crate::hello_triangle_application::raw_vulkan_helpers;
+use crate::hello_triangle_application::HEIGHT;
+use crate::hello_triangle_application::WIDTH;
 use ash::{
   extensions,
   version::DeviceV1_0,   //Needed for methods on Device
@@ -37,6 +39,7 @@ pub struct VulkanStructures {
   logical_device: Device,
   graphics_queue: vk::Queue,
   present_queue: vk::Queue,
+  swapchain_structures: VulkanSwapChainStructures,
 }
 
 // Each extension is wrapped in it's own struct with it's created structures to
@@ -52,6 +55,35 @@ struct VulkanSurfaceStructures {
   surface: vk::SurfaceKHR,
 }
 
+struct VulkanSwapChainStructures {
+  swapchain_extension: extensions::Swapchain,
+  swap_chain: vk::SwapchainKHR,
+}
+
+// A struct of all the indices of the different queue families a vulkan devices
+// supports.
+#[derive(Default, Debug)]
+struct HelloTriangeNeededQueueFamilyIndices {
+  graphics_queue_family: Option<u32>,
+  present_queue_family: Option<u32>,
+}
+
+impl HelloTriangeNeededQueueFamilyIndices {
+  // This set of QueueFamilyIndices has each of the tracked types of necessary
+  // queues (right now it is only graphics queues, but this will change when I'm
+  // not stupid anymore).
+  fn is_complete(&self) -> bool {
+    self.graphics_queue_family.is_some() && self.present_queue_family.is_some()
+  }
+}
+
+#[derive(Debug)]
+struct SwapChainSupportDetails {
+  capabilities: vk::SurfaceCapabilitiesKHR,
+  formats: Vec<vk::SurfaceFormatKHR>,
+  present_modes: Vec<vk::PresentModeKHR>,
+}
+
 // Have to manually deallocate (vkDestroyInstance, destroy debug utils) etc.
 // Physical Devices are cleaned up when the instance is destroyed, so no need to
 // do that manually. Logical devices, however, are not, since they're not part
@@ -62,6 +94,11 @@ struct VulkanSurfaceStructures {
 impl Drop for VulkanStructures {
   fn drop(&mut self) {
     unsafe {
+      self
+        .swapchain_structures
+        .swapchain_extension
+        .destroy_swapchain_khr(self.swapchain_structures.swap_chain, None);
+
       self
         .surface_structures
         .surface_extension
@@ -119,12 +156,22 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
     &vk::PhysicalDeviceFeatures::builder().build(),
   );
 
+  // Get the queues that were created with the logical device.
   let graphics_queue = unsafe {
     logical_device.get_device_queue(queue_family_indices.graphics_queue_family.unwrap(), 0u32)
   };
   let present_queue = unsafe {
-    logical_device.get_device_queue(queue_family_indices.display_queue_family.unwrap(), 0u32)
+    logical_device.get_device_queue(queue_family_indices.present_queue_family.unwrap(), 0u32)
   };
+
+  let swapchain_extension = extensions::Swapchain::new(&instance, &logical_device);
+  let swapchain_structures = create_swap_chain_structures(
+    swapchain_extension,
+    &instance,
+    &surface_structures,
+    &physical_device,
+    &logical_device.handle(),
+  );
 
   let vulkan_structures = VulkanStructures {
     entry,
@@ -134,6 +181,7 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
     logical_device,
     graphics_queue,
     present_queue,
+    swapchain_structures,
   };
   vulkan_structures
 }
@@ -211,7 +259,7 @@ fn print_supported_extensions(entry: &Entry) {
   }
 }
 
-fn validate_layers_exist(layer_properties: &Vec<vk::LayerProperties>) {
+fn validate_layers_exist(layer_properties: &[vk::LayerProperties]) {
   for &enabled_layer in VALIDATION_LAYERS_CSTR {
     unsafe {
       let search_layer = CStr::from_ptr(enabled_layer.as_ptr() as *const c_char)
@@ -222,7 +270,7 @@ fn validate_layers_exist(layer_properties: &Vec<vk::LayerProperties>) {
   }
 }
 
-fn validate_layer_exists(layer_properties: &Vec<vk::LayerProperties>, search_layer: &str) {
+fn validate_layer_exists(layer_properties: &[vk::LayerProperties], search_layer: &str) {
   for &layer in layer_properties.iter() {
     unsafe {
       let extant_layer =
@@ -308,18 +356,19 @@ fn is_device_suitable(
   // be sure one of the queues supports it for the device to be suitable.
   let has_queue_families = find_queue_families(instance, device, surface_structures).is_complete();
 
-  // We also need to verify the necessary extensions are supported by the physical device.
-  // Right now that's just vk_khr_swapchain.
+  // We also need to verify the necessary extensions are supported by the physical
+  // device. Right now that's just vk_khr_swapchain.
   let extensions_supported = unsafe {
-    instance.enumerate_device_extension_properties(*device)
+    instance
+      .enumerate_device_extension_properties(*device)
       .expect("Could not enumerate device extension properties")
       .iter()
       .any(|x| CStr::from_ptr(x.extension_name.as_ptr()) == extensions::Swapchain::name())
   };
 
-  // Just because the device supports the extensions doesn't mean the surface does!
-  // Here we check if the surface supports the swapchain extension by making sure there are formats and
-  // present modes for it in the surface.
+  // Just because the device supports the extensions doesn't mean the surface
+  // does! Here we check if the surface supports the swapchain extension by
+  // making sure there are formats and present modes for it in the surface.
   let swapchain_adequete = if extensions_supported {
     let swap_chain_support = query_swapchain_support(surface_structures, device);
     !swap_chain_support.present_modes.is_empty() && !swap_chain_support.formats.is_empty()
@@ -357,7 +406,7 @@ fn find_queue_families(
         .surface_extension
         .get_physical_device_surface_support_khr(*device, i as u32, surface_structures.surface);
       if present_supported {
-        queue_family_indices.display_queue_family = Some(i as u32);
+        queue_family_indices.present_queue_family = Some(i as u32);
       }
 
       // All the needed queues have been found.
@@ -370,18 +419,114 @@ fn find_queue_families(
   queue_family_indices
 }
 
-fn query_swapchain_support(surface_structures: &VulkanSurfaceStructures, device: &vk::PhysicalDevice) -> SwapChainSupportDetails {
+fn query_swapchain_support(
+  surface_structures: &VulkanSurfaceStructures,
+  device: &vk::PhysicalDevice,
+) -> SwapChainSupportDetails {
   unsafe {
-    let capabilities =
-      surface_structures.surface_extension.get_physical_device_surface_capabilities_khr(*device, surface_structures.surface).expect("Could not query surface capabilities");
-    let formats = surface_structures.surface_extension.get_physical_device_surface_formats_khr(*device, surface_structures.surface).expect("could not query surface formats");
-    let present_modes = surface_structures.surface_extension.get_physical_device_surface_present_modes_khr(*device, surface_structures.surface).expect("Could not query surface present modes");
+    let capabilities = surface_structures
+      .surface_extension
+      .get_physical_device_surface_capabilities_khr(*device, surface_structures.surface)
+      .expect("Could not query surface capabilities");
+    let formats = surface_structures
+      .surface_extension
+      .get_physical_device_surface_formats_khr(*device, surface_structures.surface)
+      .expect("could not query surface formats");
+    let present_modes = surface_structures
+      .surface_extension
+      .get_physical_device_surface_present_modes_khr(*device, surface_structures.surface)
+      .expect("Could not query surface present modes");
     SwapChainSupportDetails {
       capabilities,
       formats,
-      present_modes
+      present_modes,
     }
   }
+}
+
+// Used to choose the optimal swap chain settings, format (color depth),
+// presentation mode (conditions for swapping), and swap extent (resolution of
+// images in swapchain).
+fn choose_swap_surface_format(available_formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
+  if available_formats.len() == 1 && available_formats[0].format == vk::Format::UNDEFINED {
+    // Surface has no preferred format, let's just pick BGR all 8 bits unsigned
+    // in sRGB color_space
+    return vk::SurfaceFormatKHR {
+      format: vk::Format::B8G8R8A8_UNORM,
+      color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+  }
+
+  // The surface is making us choose a format, so let's pick from what's
+  // available.
+  for available_format in available_formats {
+    if available_format.format == vk::Format::B8G8R8A8_UNORM
+      && available_format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+    {
+      return available_format.clone();
+    }
+  }
+
+  // Nothing matches our preferences, we could rank how "good" they are,
+  // but whatever lets just take the first one.
+  return available_formats[0].clone();
+}
+
+// Quite an important setting, defines how the swap chain operates (presents)
+// the images to the surface. Can immediately show, may result in tearing.
+// (VK_PRESENT_MODE_IMMEDIATE_KHR). Can Queue images to be shown and show them
+// on swaps aka vblanks (VK_PRESSENT_MODE_FIFO_KHR). Guaranteed to be available.
+// A relaxed version of above that will immediately show an image if the queue
+// was empty instead of waiting for a swap, potentially tearing. Finally a queue
+// that will replace old images if the FIFO fills up, avoids tearing with less
+// latency (triple buffering) (VK_PRESENT_MODE_MAILBOX_KHR).
+fn choose_swap_present_mode(available_present_modes: &[vk::PresentModeKHR]) -> vk::PresentModeKHR {
+  // Prefer mailbox.
+  for available_present_mode in available_present_modes {
+    if available_present_mode.as_raw() == vk::PresentModeKHR::MAILBOX.as_raw() {
+      return available_present_mode.clone();
+    }
+  }
+
+  // Fallback to FIFO
+  return vk::PresentModeKHR::FIFO;
+}
+
+// TODO forward WIDTH and HEIGHT as params.
+// This selects the resolution of the swap chain images, almost always equal to
+// the resolution of the window. The range of possible resolutions is defined in
+// this structure.
+fn choose_swap_extent(capabilites: &vk::SurfaceCapabilitiesKHR) -> vk::Extent2D {
+  if capabilites.current_extent.width != std::u32::MAX {
+    return capabilites.current_extent;
+  }
+  // Some window managers set current widht and height to max positive value to
+  // indicate that we
+  // can select any resolution we want.  In that case I just want to put in the
+  // resolution within the max extents that matches the window
+  vk::Extent2D {
+    width: std::cmp::max(
+      capabilites.min_image_extent.width,
+      std::cmp::min(capabilites.max_image_extent.width, WIDTH),
+    ),
+    height: std::cmp::max(
+      capabilites.min_image_extent.height,
+      std::cmp::min(capabilites.max_image_extent.height, HEIGHT),
+    ),
+  }
+}
+
+// Choose number of images in the swap chain, try to do minimum plus 1 for
+// triple buffering (TODO parameterize buffering).
+fn choose_swap_image_count(capabilities: &vk::SurfaceCapabilitiesKHR) -> u32 {
+  let image_count = capabilities.min_image_count + 1;
+
+  // max image count of 0 means unlimited so here's some logic to check for that.
+  if capabilities.max_image_count > 0 && image_count > capabilities.max_image_count {
+    return capabilities.max_image_count;
+  }
+
+  image_count
 }
 
 fn print_device_information(instance: &Instance, device: &vk::PhysicalDevice) {
@@ -436,10 +581,10 @@ fn create_logical_device(
 
   if !queue_vec_already_contains_index(
     &queue_creation_infos,
-    queue_family_indices.display_queue_family.unwrap(),
+    queue_family_indices.present_queue_family.unwrap(),
   ) {
     let present_queue_creation_info = vk::DeviceQueueCreateInfo::builder()
-      .queue_family_index(queue_family_indices.display_queue_family.unwrap())
+      .queue_family_index(queue_family_indices.present_queue_family.unwrap())
       .queue_priorities(&[1.0])
       .build();
   }
@@ -468,13 +613,86 @@ fn create_logical_device(
 }
 
 fn queue_vec_already_contains_index(
-  queue_creation_infos: &Vec<vk::DeviceQueueCreateInfo>,
+  queue_creation_infos: &[vk::DeviceQueueCreateInfo],
   index: u32,
 ) -> bool {
   queue_creation_infos
     .iter()
     .map(|x| x.queue_family_index)
     .any(|x| x == index)
+}
+
+fn create_swap_chain_structures(
+  swapchain_extension: extensions::Swapchain,
+  instance: &Instance,
+  surface_structures: &VulkanSurfaceStructures,
+  physical_device: &vk::PhysicalDevice,
+  logical_device: &vk::Device,
+) -> VulkanSwapChainStructures {
+  // Create the swap chain so that we have something to use to draw to the
+  // surface. There are thrree major properties of a swap chain that we will
+  // also configure: Surface Format, Presentation Mode, and Swap Extent,
+  // explained in their helper functions.
+  let swap_chain_support_details = query_swapchain_support(&surface_structures, &physical_device);
+  let surface_format = choose_swap_surface_format(&swap_chain_support_details.formats);
+  let present_mode = choose_swap_present_mode(&swap_chain_support_details.present_modes);
+  let extent = choose_swap_extent(&swap_chain_support_details.capabilities);
+  let image_count = choose_swap_image_count(&swap_chain_support_details.capabilities);
+
+  // If a window is resized etc, the swapchain needs to be recreated.  This is too
+  // hard for now and we'll leave it for a TODO. Next we specify what happens if
+  // we're using multiple command queues (one for graphics and one for presenting)
+  // usually not. Sharing Mode Exclusive, one queue at a time owns the image at
+  // a time and ownership is explicitly transferred, most performant.
+  // Sharing Mode Concurrent, images can be used across queue families without
+  // explicit ownership.
+  let indices = find_queue_families(&instance, &physical_device, &surface_structures);
+
+  let image_sharing_mode;
+  let queue_family_indices;
+  if indices.graphics_queue_family != indices.present_queue_family {
+    // Different queues, synchronizing this is not something to do this early on,
+    // later I'll learn how to do that.
+    image_sharing_mode = vk::SharingMode::CONCURRENT;
+    queue_family_indices = vec![
+      indices.graphics_queue_family.unwrap(),
+      indices.present_queue_family.unwrap(),
+    ];
+  } else {
+    // Same queue.
+    image_sharing_mode = vk::SharingMode::EXCLUSIVE;
+    queue_family_indices = vec![];
+  }
+
+  let swap_chain_create_info_builder = vk::SwapchainCreateInfoKHR::builder()
+    .min_image_count(image_count)
+    .image_format(surface_format.format)
+    .image_color_space(surface_format.color_space)
+    .image_extent(extent)
+    .image_array_layers(1) // How many layers each image consists of.  This is 1 unless you're doing stereoscopic 3D.
+    // Specifies we're using this for drawing directly, there's also TRANSFER_DST, which is for
+    // transfering memory to the swap chain, like in post processing etc. (remember that ogl
+    // tutorial with the normals, depth, etc that were used for futher calculation?
+    .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+    .pre_transform(swap_chain_support_details.capabilities.current_transform) // Don't rotate the screen or anything.
+    .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE) // Don't blend with other windows in the window system.
+    .present_mode(present_mode)
+    .clipped(true) // Set clipping to true.  If pixels are obscured by other windows etc, we dont care about their
+    // color and the can be clipped out.
+    .old_swapchain(vk::SwapchainKHR::null())
+    .image_sharing_mode(image_sharing_mode)
+    .queue_family_indices(&queue_family_indices);
+
+  let swap_chain = unsafe {
+    swapchain_extension
+      .create_swapchain_khr(&swap_chain_create_info_builder.build(), None)
+      .expect("Could not create swapchain")
+  };
+
+  VulkanSwapChainStructures {
+    swapchain_extension,
+    swap_chain,
+  }
 }
 
 // Rust FFI, never thought I'd use this but here's a callback for errors to be
@@ -492,28 +710,4 @@ unsafe extern "system" fn debug_callback(
 
   // Always return false, true indicates that validation itself failed, only useful for developing validation layers so as a user of Vulkan I dont use it.
   return 0;
-}
-
-// A struct of all the indices of the different queue families a vulkan devices
-// supports.
-#[derive(Default, Debug)]
-struct HelloTriangeNeededQueueFamilyIndices {
-  graphics_queue_family: Option<u32>,
-  display_queue_family: Option<u32>,
-}
-
-impl HelloTriangeNeededQueueFamilyIndices {
-  // This set of QueueFamilyIndices has each of the tracked types of necessary
-  // queues (right now it is only graphics queues, but this will change when I'm
-  // not stupid anymore).
-  fn is_complete(&self) -> bool {
-    self.graphics_queue_family.is_some() && self.display_queue_family.is_some()
-  }
-}
-
-#[derive(Debug)]
-struct SwapChainSupportDetails {
-  capabilities: vk::SurfaceCapabilitiesKHR,
-  formats: Vec<vk::SurfaceFormatKHR>,
-  present_modes: Vec<vk::PresentModeKHR>,
 }
