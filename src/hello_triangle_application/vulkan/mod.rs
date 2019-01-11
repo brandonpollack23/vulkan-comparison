@@ -41,6 +41,7 @@ pub struct VulkanStructures {
   present_queue: vk::Queue,
   swap_chain_structures: VulkanSwapChainStructures,
   swap_chain_images: Vec<vk::Image>,
+  image_views: Vec<vk::ImageView>,
 }
 
 // Each extension is wrapped in it's own struct with it's created structures to
@@ -167,6 +168,7 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
     logical_device.get_device_queue(queue_family_indices.present_queue_family.unwrap(), 0u32)
   };
 
+  // Load swap chain extension and create all the structures to use it.
   let swap_chain_structures = create_swap_chain_structures(
     &instance,
     &surface_structures,
@@ -182,6 +184,8 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
       .expect("Could not get images out of swapchain")
   };
 
+  let image_views = create_image_views(&swap_chain_images, &swap_chain_structures, &logical_device);
+
   let vulkan_structures = VulkanStructures {
     entry,
     instance,
@@ -192,6 +196,7 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
     present_queue,
     swap_chain_structures,
     swap_chain_images,
+    image_views,
   };
   vulkan_structures
 }
@@ -708,6 +713,36 @@ fn create_swap_chain_structures(
   }
 }
 
+fn create_image_views(
+  swap_chain_images: &[vk::Image],
+  swap_chain_structures: &VulkanSwapChainStructures,
+  logical_device: &Device,
+) {
+  swap_chain_images
+    .iter()
+    .map(|image| {
+      // Leave components default, so no swizzling of rgb
+      let image_view_create_info = vk::ImageViewCreateInfo::builder()
+        .image(*image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(swap_chain_structures.swap_chain_image_format)
+        .subresource_range(
+          vk::ImageSubresourceRange::builder() // This describes image's purpose and what part should be accessed, for us this is a
+            // color target with no mipmapping etc since it's the just whats drawing to the screen,
+            // not a texture.
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1)
+            .build(),
+        )
+        .build();
+      unsafe { logical_device.create_image_view(&image_view_create_info, None) }
+    })
+    .collect()
+}
+
 // Rust FFI, never thought I'd use this but here's a callback for errors to be
 // called from the C vulkan API.
 unsafe extern "system" fn debug_callback(
@@ -728,8 +763,8 @@ unsafe extern "system" fn debug_callback(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use winit::*;
   use winit::dpi::LogicalSize;
+  use winit::*;
 
   #[test]
   fn test_vulkan_initializes_without_crashing() {
