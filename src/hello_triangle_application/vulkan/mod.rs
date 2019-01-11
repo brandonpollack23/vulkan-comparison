@@ -98,6 +98,10 @@ struct SwapChainSupportDetails {
 impl Drop for VulkanStructures {
   fn drop(&mut self) {
     unsafe {
+      self.image_views.iter().for_each(|image_view| {
+        self.logical_device.destroy_image_view(*image_view, None);
+      });
+
       self
         .swap_chain_structures
         .swap_chain_extension
@@ -185,6 +189,16 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
   };
 
   let image_views = create_image_views(&swap_chain_images, &swap_chain_structures, &logical_device);
+
+  // Finally, all the pieces of the Setup and presentation extensions are complete
+  // Now we have to create the graphics pipeline and we'll be done.
+  // NOTE: A new graphics pipeline needs to be constructed from scratch if it is
+  // changed or created to begin with. So every different technique for drawing
+  // etc would need to be created here (EG a regular object draw, a shadow map
+  // pass, an alpha blend of just textures to create a new texture, would all use
+  // slightly different pipeline configurations and need to be recreated).
+  // TODO returns vk::Pipeline
+  let pipeline = create_pipeline();
 
   let vulkan_structures = VulkanStructures {
     entry,
@@ -717,7 +731,7 @@ fn create_image_views(
   swap_chain_images: &[vk::Image],
   swap_chain_structures: &VulkanSwapChainStructures,
   logical_device: &Device,
-) {
+) -> Vec<vk::ImageView> {
   swap_chain_images
     .iter()
     .map(|image| {
@@ -738,7 +752,11 @@ fn create_image_views(
             .build(),
         )
         .build();
-      unsafe { logical_device.create_image_view(&image_view_create_info, None) }
+      unsafe {
+        logical_device
+          .create_image_view(&image_view_create_info, None)
+          .expect("Error creating image view")
+      }
     })
     .collect()
 }
