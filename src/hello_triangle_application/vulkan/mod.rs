@@ -724,3 +724,27 @@ unsafe extern "system" fn debug_callback(
   // Always return false, true indicates that validation itself failed, only useful for developing validation layers so as a user of Vulkan I dont use it.
   return 0;
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use winit::*;
+  use winit::dpi::LogicalSize;
+
+  #[test]
+  fn test_vulkan_initializes_without_crashing() {
+    let window = create_window();
+    initialize_vulkan(&window);
+  }
+
+  fn create_window() -> Window {
+    let events_loop = EventsLoop::new();
+    let window = WindowBuilder::new()
+      .with_title("Test Title")
+      .with_dimensions(LogicalSize::new(f64::from(WIDTH), f64::from(HEIGHT)))
+      .with_resizable(false)
+      .build(&events_loop)
+      .expect("Error Creating Window");
+    window
+  }
+}
