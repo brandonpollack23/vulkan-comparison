@@ -167,18 +167,19 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
     logical_device.get_device_queue(queue_family_indices.present_queue_family.unwrap(), 0u32)
   };
 
-  let swap_chain_extension = extensions::Swapchain::new(&instance, &logical_device);
   let swap_chain_structures = create_swap_chain_structures(
-    swap_chain_extension,
     &instance,
     &surface_structures,
     &physical_device,
-    &logical_device.handle(),
+    &logical_device,
   );
 
   // Now that the swapchain is created, we take the handle to the image out of it.
   let swap_chain_images = unsafe {
-    swap_chain_structures.swap_chain_extension.get_swapchain_images_khr(swap_chain_structures.swap_chain).expect("Could not get images out of swapchain")
+    swap_chain_structures
+      .swap_chain_extension
+      .get_swapchain_images_khr(swap_chain_structures.swap_chain)
+      .expect("Could not get images out of swapchain")
   };
 
   let vulkan_structures = VulkanStructures {
@@ -190,7 +191,7 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
     graphics_queue,
     present_queue,
     swap_chain_structures,
-    swap_chain_images
+    swap_chain_images,
   };
   vulkan_structures
 }
@@ -632,12 +633,12 @@ fn queue_vec_already_contains_index(
 }
 
 fn create_swap_chain_structures(
-  swap_chain_extension: extensions::Swapchain,
   instance: &Instance,
   surface_structures: &VulkanSurfaceStructures,
   physical_device: &vk::PhysicalDevice,
-  logical_device: &vk::Device,
+  logical_device: &Device,
 ) -> VulkanSwapChainStructures {
+  let swap_chain_extension = extensions::Swapchain::new(instance, logical_device);
   // Create the swap chain so that we have something to use to draw to the
   // surface. There are thrree major properties of a swap chain that we will
   // also configure: Surface Format, Presentation Mode, and Swap Extent,
@@ -703,7 +704,7 @@ fn create_swap_chain_structures(
     swap_chain_extension,
     swap_chain,
     swap_chain_image_format: surface_format.format,
-    swap_chain_extent: extent
+    swap_chain_extent: extent,
   }
 }
 
