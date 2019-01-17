@@ -46,6 +46,7 @@ pub struct VulkanStructures {
   image_views: Vec<vk::ImageView>,
   pipeline_structures: VulkanPipelineStructures,
   swap_chain_framebuffers: Vec<vk::Framebuffer>,
+  command_structures: VulkanCommandStructures,
 }
 
 // Each extension is wrapped in it's own struct with it's created structures to
@@ -72,6 +73,11 @@ struct VulkanPipelineStructures {
   render_pass: vk::RenderPass,
   pipeline_layout: vk::PipelineLayout,
   graphics_pipeline: vk::Pipeline,
+}
+
+struct VulkanCommandStructures {
+  command_pool: vk::CommandPool,
+  command_buffers: Vec<vk::CommandBuffer>,
 }
 
 // A struct of all the indices of the different queue families a vulkan devices
@@ -108,6 +114,8 @@ struct SwapChainSupportDetails {
 impl Drop for VulkanStructures {
   fn drop(&mut self) {
     unsafe {
+      self.logical_device.destroy_command_pool(self.command_structures.command_pool, None);
+
       for framebuffer in self.swap_chain_framebuffers.iter() {
         self.logical_device.destroy_framebuffer(*framebuffer, None);
       }
@@ -235,6 +243,8 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
     &swap_chain_structures,
   );
 
+  let command_structures = create_command_structures(&instance, &physical_device, &logical_device, swap_chain_framebuffers.len(), &surface_structures);
+
   let vulkan_structures = VulkanStructures {
     entry,
     instance,
@@ -248,6 +258,7 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
     image_views,
     pipeline_structures,
     swap_chain_framebuffers,
+    command_structures,
   };
   vulkan_structures
 }
@@ -1071,6 +1082,36 @@ fn create_framebuffers(
   }
 
   framebuffers
+}
+
+fn create_command_structures(instance: &Instance, device: &vk::PhysicalDevice, logical_device: &Device, num_framebuffers: usize, surface_structures: &VulkanSurfaceStructures) -> VulkanCommandStructures {
+  let queue_family_indices = find_queue_families(instance, device, surface_structures);
+
+  let command_pool_create_info = vk::CommandPoolCreateInfo::builder()
+    .queue_family_index(queue_family_indices.graphics_queue_family.unwrap())
+    .build();
+
+  unsafe {
+    let command_pool = logical_device.create_command_pool(&command_pool_create_info, None).expect("Could not create command pool");
+    let command_buffers = create_command_buffers(logical_device, num_framebuffers, command_pool);
+
+    VulkanCommandStructures {
+      command_pool,
+      command_buffers,
+    }
+  }
+}
+
+fn create_command_buffers(logical_device: &Device, num_framebuffers: usize, command_pool: vk::CommandPool) -> Vec<vk::CommandBuffer> {
+  let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
+    .command_pool(command_pool)
+    .level(vk::CommandBufferLevel::PRIMARY)
+    .command_buffer_count(num_framebuffers as u32)
+    .build();
+
+  unsafe {
+    logical_device.allocate_command_buffers(&command_buffer_allocate_info).expect("Could not allocate command buffer!")
+  }
 }
 
 #[cfg(test)]
