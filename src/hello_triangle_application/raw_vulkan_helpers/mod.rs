@@ -1,18 +1,19 @@
 // I now know that Surface::name() is VK_KHR_Surface, an extension needed
 // to create VkSurfaceKHR, which is an abstract surface to present rendered
 // images to.  This surface is backed by a window which winit created for us.
-use ash::extensions::{DebugReport, Surface};
+use ash::extensions::ext::DebugReport;
+use ash::extensions::khr::Surface;
 
 // These are the platform specific surfaces that compliment the abstract surface
 // described above.  This is because a vulkan surface depends on the host
 // windowing system, and therefore an HWND on windows, or...whatever X uses and
 // Aqua uses for window handle identifiers.
 #[cfg(target_os = "macos")]
-use ash::extensions::MacOSSurface;
+use ash::extensions::khr::MacOSSurface;
 #[cfg(target_os = "windows")]
-use ash::extensions::Win32Surface;
+use ash::extensions::khr::Win32Surface;
 #[cfg(all(unix, not(target_os = "android"), not(target_os = "macos")))]
-use ash::extensions::XlibSurface;
+use ash::extensions::khr::XlibSurface;
 
 use ash::version::{EntryV1_0, InstanceV1_0};
 use ash::vk;
@@ -63,7 +64,7 @@ pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
     .dpy(x11_display as *mut vk::Display);
 
   let xlib_surface_loader = XlibSurface::new(entry, instance);
-  xlib_surface_loader.create_xlib_surface_khr(&x11_create_info, None)
+  xlib_surface_loader.create_xlib_surface(&x11_create_info, None)
 }
 
 #[cfg(target_os = "macos")]
@@ -75,7 +76,7 @@ pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
   use std::ptr;
   use winit::os::macos::WindowExt;
 
-  let wnd: cocoa_id = mem::transmute(window.get_nswindow());
+  let wnd: cocoa_id = std::mem::transmute(window.get_nswindow());
 
   let layer = CoreAnimationLayer::new();
 
@@ -86,7 +87,7 @@ pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
   let view = wnd.contentView();
 
   layer.set_contents_scale(view.backingScaleFactor());
-  view.setLayer(mem::transmute(layer.as_ref()));
+  view.setLayer(std::mem::transmute(layer.as_ref()));
   view.setWantsLayer(YES);
 
   let create_info = vk::MacOSSurfaceCreateInfoMVK {
@@ -97,7 +98,7 @@ pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
   };
 
   let macos_surface_loader = MacOSSurface::new(entry, instance);
-  macos_surface_loader.create_mac_os_surface_mvk_khr(&create_info, None)
+  macos_surface_loader.create_mac_os_surface_mvk(&create_info, None)
 }
 
 #[cfg(target_os = "windows")]
@@ -122,5 +123,5 @@ pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
   };
   let win32_surface_loader = Win32Surface::new(entry, instance);
 
-  win32_surface_loader.create_win32_surface_khr(&win32_create_info, None)
+  win32_surface_loader.create_win32_surface(&win32_create_info, None)
 }

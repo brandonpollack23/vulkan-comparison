@@ -1,6 +1,7 @@
 use crate::hello_triangle_application::raw_vulkan_helpers;
 use crate::hello_triangle_application::HEIGHT;
 use crate::hello_triangle_application::WIDTH;
+use ash::util::*;
 use ash::{
   extensions,
   version::DeviceV1_0,   //Needed for methods on Device
@@ -13,6 +14,7 @@ use ash::{
   Instance,
 };
 use std::ffi::CStr;
+use std::fs;
 use std::os::raw::c_char;
 use std::str;
 use winit::Window;
@@ -42,26 +44,33 @@ pub struct VulkanStructures {
   swap_chain_structures: VulkanSwapChainStructures,
   swap_chain_images: Vec<vk::Image>,
   image_views: Vec<vk::ImageView>,
+  pipeline_structures: VulkanPipelineStructures,
 }
 
 // Each extension is wrapped in it's own struct with it's created structures to
 // allow their functions to be accessed more easily in Drop, and logically group
 // them together.
 struct CallbackStructures {
-  debug_utils_extension: extensions::DebugUtils,
+  debug_utils_extension: extensions::ext::DebugUtils,
   debug_callback_structure: vk::DebugUtilsMessengerEXT,
 }
 
 struct VulkanSurfaceStructures {
-  surface_extension: extensions::Surface,
+  surface_extension: extensions::khr::Surface,
   surface: vk::SurfaceKHR,
 }
 
 struct VulkanSwapChainStructures {
-  swap_chain_extension: extensions::Swapchain,
+  swap_chain_extension: extensions::khr::Swapchain,
   swap_chain: vk::SwapchainKHR,
   swap_chain_image_format: vk::Format,
   swap_chain_extent: vk::Extent2D,
+}
+
+struct VulkanPipelineStructures {
+  render_pass: vk::RenderPass,
+  pipeline_layout: vk::PipelineLayout,
+  graphics_pipeline: vk::Pipeline,
 }
 
 // A struct of all the indices of the different queue families a vulkan devices
@@ -98,6 +107,18 @@ struct SwapChainSupportDetails {
 impl Drop for VulkanStructures {
   fn drop(&mut self) {
     unsafe {
+      self
+        .logical_device
+        .destroy_pipeline(self.pipeline_structures.graphics_pipeline, None);
+
+      self
+        .logical_device
+        .destroy_render_pass(self.pipeline_structures.render_pass, None);
+
+      self
+        .logical_device
+        .destroy_pipeline_layout(self.pipeline_structures.pipeline_layout, None);
+
       self.image_views.iter().for_each(|image_view| {
         self.logical_device.destroy_image_view(*image_view, None);
       });
@@ -105,12 +126,12 @@ impl Drop for VulkanStructures {
       self
         .swap_chain_structures
         .swap_chain_extension
-        .destroy_swapchain_khr(self.swap_chain_structures.swap_chain, None);
+        .destroy_swapchain(self.swap_chain_structures.swap_chain, None);
 
       self
         .surface_structures
         .surface_extension
-        .destroy_surface_khr(self.surface_structures.surface, None);
+        .destroy_surface(self.surface_structures.surface, None);
 
       self.logical_device.destroy_device(None);
 
@@ -118,7 +139,7 @@ impl Drop for VulkanStructures {
       if let Some(callback_structures) = self.callback_structures.as_mut() {
         callback_structures
           .debug_utils_extension
-          .destroy_debug_utils_messenger_ext(callback_structures.debug_callback_structure, None);
+          .destroy_debug_utils_messenger(callback_structures.debug_callback_structure, None);
       }
 
       // Destroy Vulkan instance.
@@ -146,7 +167,7 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
     raw_vulkan_helpers::create_surface(&entry, &instance, window).expect("Could not create surface")
   };
   let surface_structures = VulkanSurfaceStructures {
-    surface_extension: extensions::Surface::new(&entry, &instance),
+    surface_extension: extensions::khr::Surface::new(&entry, &instance),
     surface,
   };
 
@@ -184,11 +205,13 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
   let swap_chain_images = unsafe {
     swap_chain_structures
       .swap_chain_extension
-      .get_swapchain_images_khr(swap_chain_structures.swap_chain)
+      .get_swapchain_images(swap_chain_structures.swap_chain)
       .expect("Could not get images out of swapchain")
   };
 
   let image_views = create_image_views(&swap_chain_images, &swap_chain_structures, &logical_device);
+
+  let render_pass = create_render_pass(&logical_device, &swap_chain_structures);
 
   // Finally, all the pieces of the Setup and presentation extensions are complete
   // Now we have to create the graphics pipeline and we'll be done.
@@ -197,8 +220,8 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
   // etc would need to be created here (EG a regular object draw, a shadow map
   // pass, an alpha blend of just textures to create a new texture, would all use
   // slightly different pipeline configurations and need to be recreated).
-  // TODO returns vk::Pipeline
-  let pipeline = create_pipeline();
+  let pipeline_structures =
+    create_graphics_pipeline(&logical_device, &swap_chain_structures, render_pass);
 
   let vulkan_structures = VulkanStructures {
     entry,
@@ -211,6 +234,7 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
     swap_chain_structures,
     swap_chain_images,
     image_views,
+    pipeline_structures,
   };
   vulkan_structures
 }
@@ -269,7 +293,7 @@ fn get_extension_names(entry: &Entry) -> Vec<*const c_char> {
         .expect("Could not enumerate layer properties"),
     );
 
-    extension_names_raw.push(extensions::DebugUtils::name().as_ptr());
+    extension_names_raw.push(extensions::ext::DebugUtils::name().as_ptr());
   }
 
   extension_names_raw
@@ -319,7 +343,7 @@ fn setup_debug_callback(entry: &Entry, instance: &Instance) -> Option<CallbackSt
   }
 
   // Load up the function pointers so we can use the functions to create.
-  let debug_utils_extension = extensions::DebugUtils::new(entry, instance);
+  let debug_utils_extension = extensions::ext::DebugUtils::new(entry, instance);
 
   // I want all the message types and levels here (Except Info).  Also specify the
   // callback function.
@@ -339,7 +363,7 @@ fn setup_debug_callback(entry: &Entry, instance: &Instance) -> Option<CallbackSt
   unsafe {
     // Build it using the function loaded above.
     let debug_callback_structure = debug_utils_extension
-      .create_debug_utils_messenger_ext(&debug_utils_messenger_create_info, None)
+      .create_debug_utils_messenger(&debug_utils_messenger_create_info, None)
       .expect("Could not create debug utils message extension callback");
 
     Some(CallbackStructures {
@@ -392,7 +416,7 @@ fn is_device_suitable(
       .enumerate_device_extension_properties(*device)
       .expect("Could not enumerate device extension properties")
       .iter()
-      .any(|x| CStr::from_ptr(x.extension_name.as_ptr()) == extensions::Swapchain::name())
+      .any(|x| CStr::from_ptr(x.extension_name.as_ptr()) == extensions::khr::Swapchain::name())
   };
 
   // Just because the device supports the extensions doesn't mean the surface
@@ -433,7 +457,7 @@ fn find_queue_families(
 
       let present_supported = surface_structures
         .surface_extension
-        .get_physical_device_surface_support_khr(*device, i as u32, surface_structures.surface);
+        .get_physical_device_surface_support(*device, i as u32, surface_structures.surface);
       if present_supported {
         queue_family_indices.present_queue_family = Some(i as u32);
       }
@@ -455,15 +479,15 @@ fn query_swapchain_support(
   unsafe {
     let capabilities = surface_structures
       .surface_extension
-      .get_physical_device_surface_capabilities_khr(*device, surface_structures.surface)
+      .get_physical_device_surface_capabilities(*device, surface_structures.surface)
       .expect("Could not query surface capabilities");
     let formats = surface_structures
       .surface_extension
-      .get_physical_device_surface_formats_khr(*device, surface_structures.surface)
+      .get_physical_device_surface_formats(*device, surface_structures.surface)
       .expect("could not query surface formats");
     let present_modes = surface_structures
       .surface_extension
-      .get_physical_device_surface_present_modes_khr(*device, surface_structures.surface)
+      .get_physical_device_surface_present_modes(*device, surface_structures.surface)
       .expect("Could not query surface present modes");
     SwapChainSupportDetails {
       capabilities,
@@ -623,7 +647,7 @@ fn create_logical_device(
   let device_create_info = vk::DeviceCreateInfo::builder()
     .queue_create_infos(queue_creation_infos.as_slice())
     .enabled_features(features)
-    .enabled_extension_names(&[extensions::Swapchain::name().as_ptr()]) // Add extensions here!
+    .enabled_extension_names(&[extensions::khr::Swapchain::name().as_ptr()]) // Add extensions here!
     .enabled_layer_names(if ENABLE_VALIDATION_LAYERS {
       unsafe { std::mem::transmute::<&[&[u8]], &[*const c_char]>(VALIDATION_LAYERS_CSTR) }
     } else {
@@ -657,7 +681,7 @@ fn create_swap_chain_structures(
   physical_device: &vk::PhysicalDevice,
   logical_device: &Device,
 ) -> VulkanSwapChainStructures {
-  let swap_chain_extension = extensions::Swapchain::new(instance, logical_device);
+  let swap_chain_extension = extensions::khr::Swapchain::new(instance, logical_device);
   // Create the swap chain so that we have something to use to draw to the
   // surface. There are thrree major properties of a swap chain that we will
   // also configure: Surface Format, Presentation Mode, and Swap Extent,
@@ -715,7 +739,7 @@ fn create_swap_chain_structures(
 
   let swap_chain = unsafe {
     swap_chain_extension
-      .create_swapchain_khr(&swap_chain_create_info_builder.build(), None)
+      .create_swapchain(&swap_chain_create_info_builder.build(), None)
       .expect("Could not create swapchain")
   };
 
@@ -776,6 +800,236 @@ unsafe extern "system" fn debug_callback(
 
   // Always return false, true indicates that validation itself failed, only useful for developing validation layers so as a user of Vulkan I dont use it.
   return 0;
+}
+
+fn create_render_pass(
+  logical_device: &Device,
+  swap_chain_structures: &VulkanSwapChainStructures,
+) -> vk::RenderPass {
+  let color_attachment = vk::AttachmentDescription::builder()
+    .format(swap_chain_structures.swap_chain_image_format)
+    .samples(vk::SampleCountFlags::TYPE_1)
+    .load_op(vk::AttachmentLoadOp::CLEAR) // Clear framebuffer to black before rendering new frame.
+    .store_op(vk::AttachmentStoreOp::STORE) // Store writes.
+    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE) // Not using stencil buffer, so dont care what the driver does with loads.
+    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE) // or stores.
+    .initial_layout(vk::ImageLayout::UNDEFINED) // Don't know layout before operation begins.
+    .final_layout(vk::ImageLayout::PRESENT_SRC_KHR) // Layout for presenting to swap chain.
+    .build();
+
+  // Only using the one color attachment, since there's only one subpass for now.
+  let attachment_reference = vk::AttachmentReference::builder()
+    .attachment(0u32)
+    .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+    .build();
+  let subpass = vk::SubpassDescription::builder()
+    .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+    .color_attachments(&[attachment_reference]) // Index here is the layout parameter in outputs in shaders.
+    .build();
+
+  let render_pass_create_info = vk::RenderPassCreateInfo::builder()
+    .attachments(&[color_attachment])
+    .subpasses(&[subpass])
+    .build();
+
+  unsafe {
+    logical_device
+      .create_render_pass(&render_pass_create_info, None)
+      .expect("Could nto create render pass")
+  }
+}
+
+// TODO parameterize, make public?
+// TODO submodule and functions
+fn create_graphics_pipeline(
+  logical_device: &Device,
+  swap_chain_structures: &VulkanSwapChainStructures,
+  render_pass: vk::RenderPass,
+) -> VulkanPipelineStructures {
+  unsafe {
+    let vert_shader_file = read_spv(&mut fs::File::open("shaders/vert.spv").unwrap())
+      .expect("Could not read vertex shader.");
+    let frag_shader_file = read_spv(&mut fs::File::open("shaders/frag.spv").unwrap())
+      .expect("Could not read frag shader.");
+
+    let vert_shader_module_create_info = vk::ShaderModuleCreateInfo::builder()
+      .code(&vert_shader_file)
+      .build();
+    let vert_shader = logical_device
+      .create_shader_module(&vert_shader_module_create_info, None)
+      .expect("Failed to create vertex shader module");
+    let vert_stage_create_info = vk::PipelineShaderStageCreateInfo::builder()
+      .stage(vk::ShaderStageFlags::VERTEX)
+      .module(vert_shader)
+      .name(CStr::from_bytes_with_nul_unchecked(b"main\0")) //shader entry point.
+      .build();
+
+    let frag_shader_module_create_info = vk::ShaderModuleCreateInfo::builder()
+      .code(&frag_shader_file)
+      .build();
+    let frag_shader = logical_device
+      .create_shader_module(&frag_shader_module_create_info, None)
+      .expect("Failed to create fragment shader module");
+    let frag_stage_create_info = vk::PipelineShaderStageCreateInfo::builder()
+      .stage(vk::ShaderStageFlags::FRAGMENT)
+      .module(frag_shader)
+      .name(CStr::from_bytes_with_nul_unchecked(b"main\0")) //shader entry point.
+      .build();
+
+    let pipeline_stage_create_infos = [vert_stage_create_info, frag_stage_create_info];
+    // END SHADER SETUP.
+
+    // BEGIN FIXED FUNCTION SETUP.
+    // Set up vertex input state.  This defines stuff like stride etc I think.
+    // For this part of the tutirial we're going through, the vertex data is inside
+    // the shader as a global, So there will be no vertex buffer, so we'll fill
+    // this in in a way to indicate there's no vertex data.
+    let vertex_input_state_create_info = vk::PipelineVertexInputStateCreateInfo::builder()
+      .vertex_binding_descriptions(&[])
+      .vertex_attribute_descriptions(&[])
+      .build();
+
+    // Input assembly, what kind of primitive geometry (triangles etc), should
+    // primitive restart be enabled? Primitive restart is when you have a strip
+    // (triangle or line strip) and a special index in the index buffer to specify
+    // the end of a given strip in the vertex buffer.
+    let input_assembly_create_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
+      .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+      .primitive_restart_enable(false)
+      .build();
+
+    // Viewport and scissors
+    // what region of the framebuffer to render to? Almost always the whole viewport
+    // (until it isnt of course...). This will also include view depth, which
+    // goes 0 to 1 in Vulkan.
+    let viewport = vk::Viewport::builder()
+      .x(0f32)
+      .y(0f32)
+      .min_depth(0f32)
+      .max_depth(1f32)
+      .width(swap_chain_structures.swap_chain_extent.width as f32)
+      .height(swap_chain_structures.swap_chain_extent.height as f32)
+      .build();
+    // Scissors are what to discard from the viewport, which is nothing most of the
+    // time.
+    let viewport_scissors = vk::Rect2D::builder()
+      .offset(vk::Offset2D { x: 0i32, y: 0i32 })
+      .extent(swap_chain_structures.swap_chain_extent)
+      .build();
+
+    let pipeline_viewport_create_info = vk::PipelineViewportStateCreateInfo::builder()
+      .viewports(&[viewport])
+      .scissors(&[viewport_scissors])
+      .build();
+
+    // Rasterization, creates the fragments inside the primitives.  Also does
+    // zbuffering, scissor test, and back face culling.
+    let rasterizer_create_info = vk::PipelineRasterizationStateCreateInfo::builder()
+      .depth_clamp_enable(false) // Instead of culling things otuside view bounds, clamps them to ends, useful for...shadow
+      // maps apparently.
+      .rasterizer_discard_enable(false) // setting to true disables rasterization.
+      .polygon_mode(vk::PolygonMode::FILL) // Line mode, fill mode, etc.
+      .line_width(1.0f32) // Default line width in fragments, anything more than 1 requires enabling the GPU feature.
+      .cull_mode(vk::CullModeFlags::BACK) // cull back faces.
+      .depth_bias_enable(false) // Depth bias can alter depth values by adding a bias, used for shadow mapping sometimes.
+      .depth_bias_constant_factor(0f32)
+      .depth_bias_clamp(0f32)
+      .depth_bias_slope_factor(0f32)
+      .build();
+
+    // Multisampling, aka MSAA, a form of anti aliasing. Works by combining shader
+    // results that rasterize to the same pixel, makes edges look smooth.
+    // This is cheaper than rendering a higher resolution then downscaling because
+    // it only occurs when multiple fragments map to one pixel.
+    let multisampling_create_info = vk::PipelineMultisampleStateCreateInfo::builder()
+      .sample_shading_enable(false) // Not needed for now
+      .rasterization_samples(vk::SampleCountFlags::TYPE_1)
+      .min_sample_shading(1f32)
+      //.sample_mask()
+      .alpha_to_coverage_enable(false)
+      .alpha_to_one_enable(false)
+      .build();
+
+    // Skipping deptha and stencil tests.  I'm not doing this so I dont need a
+    // create_info for them.
+
+    // Color blending. Combining color already in buffer with fragment's output
+    // color (like for transparency). We don't need it now so it's off
+    let color_blend_attachment = vk::PipelineColorBlendAttachmentState::builder()
+      .color_write_mask(
+        vk::ColorComponentFlags::R
+          | vk::ColorComponentFlags::G
+          | vk::ColorComponentFlags::B
+          | vk::ColorComponentFlags::A,
+      )
+      .blend_enable(false) // No need to blend yet.
+      .src_color_blend_factor(vk::BlendFactor::ONE) // All the following are unneeded because blending is off, but it'll produce alpha blending.
+      .dst_color_blend_factor(vk::BlendFactor::ZERO)
+      .color_blend_op(vk::BlendOp::ADD)
+      .src_alpha_blend_factor(vk::BlendFactor::ONE)
+      .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+      .alpha_blend_op(vk::BlendOp::ADD)
+      .build();
+    let color_blend_state_create_info = vk::PipelineColorBlendStateCreateInfo::builder()
+      .logic_op_enable(false)
+      .logic_op(vk::LogicOp::COPY)
+      .attachments(&[color_blend_attachment])
+      .blend_constants([0.0; 4])
+      .build();
+
+    // Dynamic state.  So some things CAN be changed without recreating the entire
+    // pipeline, and that is configured here. Things like viewport size, line
+    // width, and blend constants.  I'm not doing this so I wont create one.
+
+    // Pipeline layout.
+    // Specify uniforms for the shader pipeline here.  This object is referenced
+    // outside of here, so it'll be part of VulkanPipelineStructures, but there
+    // is nothing to configure so it's empty for now.
+    let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::builder()
+      .set_layouts(&[])
+      .push_constant_ranges(&[]);
+
+    let pipeline_layout = logical_device
+      .create_pipeline_layout(&pipeline_layout_create_info, None)
+      .expect("Unable to create pipeline layout!");
+    // END OF FIXED FUNCTIONS CONFIGURATION!!!
+
+    let graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo::builder()
+      .stages(&pipeline_stage_create_infos)
+      .vertex_input_state(&vertex_input_state_create_info)
+      .input_assembly_state(&input_assembly_create_info)
+      .viewport_state(&pipeline_viewport_create_info)
+      .rasterization_state(&rasterizer_create_info)
+      .multisample_state(&multisampling_create_info)
+      //.depth_stencil_state() default null, unused
+      .color_blend_state(&color_blend_state_create_info)
+      //.dynamic_state() null, defaut unusued
+      .layout(pipeline_layout)
+      .render_pass(render_pass)
+      .subpass(0)
+      //.base_pipeline_handle(vk::Pipeline::default()) // used if creating pipeline out of anohter, more efficient, but there is only one pipeline now so it isn't needed.
+      .build();
+
+    // No pipeline cache for now, speeds up pipeline creation but idk how to use
+    // this. For now only one, so hard moving the first element out.
+    let graphics_pipeline = logical_device
+      .create_graphics_pipelines(
+        vk::PipelineCache::default(),
+        &[graphics_pipeline_create_info],
+        None,
+      )
+      .expect("Could not create graphics pipeline")[0];
+
+    // Cleanup.
+    logical_device.destroy_shader_module(vert_shader, None);
+    logical_device.destroy_shader_module(frag_shader, None);
+
+    VulkanPipelineStructures {
+      render_pass,
+      pipeline_layout,
+      graphics_pipeline,
+    }
+  }
 }
 
 #[cfg(test)]
