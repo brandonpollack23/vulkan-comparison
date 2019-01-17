@@ -45,6 +45,7 @@ pub struct VulkanStructures {
   swap_chain_images: Vec<vk::Image>,
   image_views: Vec<vk::ImageView>,
   pipeline_structures: VulkanPipelineStructures,
+  swap_chain_framebuffers: Vec<vk::Framebuffer>,
 }
 
 // Each extension is wrapped in it's own struct with it's created structures to
@@ -107,6 +108,10 @@ struct SwapChainSupportDetails {
 impl Drop for VulkanStructures {
   fn drop(&mut self) {
     unsafe {
+      for framebuffer in self.swap_chain_framebuffers.iter() {
+        self.logical_device.destroy_framebuffer(*framebuffer, None);
+      }
+
       self
         .logical_device
         .destroy_pipeline(self.pipeline_structures.graphics_pipeline, None);
@@ -223,6 +228,13 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
   let pipeline_structures =
     create_graphics_pipeline(&logical_device, &swap_chain_structures, render_pass);
 
+  let swap_chain_framebuffers = create_framebuffers(
+    &logical_device,
+    &image_views,
+    &pipeline_structures,
+    &swap_chain_structures,
+  );
+
   let vulkan_structures = VulkanStructures {
     entry,
     instance,
@@ -235,6 +247,7 @@ pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
     swap_chain_images,
     image_views,
     pipeline_structures,
+    swap_chain_framebuffers,
   };
   vulkan_structures
 }
@@ -1030,6 +1043,34 @@ fn create_graphics_pipeline(
       graphics_pipeline,
     }
   }
+}
+
+fn create_framebuffers(
+  logical_device: &Device,
+  image_views: &[vk::ImageView],
+  graphics_pipeline_structures: &VulkanPipelineStructures,
+  swap_chain_structures: &VulkanSwapChainStructures,
+) -> Vec<vk::Framebuffer> {
+  let mut framebuffers: Vec<vk::Framebuffer> = Vec::with_capacity(image_views.len());
+
+  for image_view in image_views {
+    let frame_buffer_create_info = vk::FramebufferCreateInfo::builder()
+      .render_pass(graphics_pipeline_structures.render_pass)
+      .attachments(&[*image_view])
+      .width(swap_chain_structures.swap_chain_extent.width)
+      .height(swap_chain_structures.swap_chain_extent.height)
+      .layers(1)
+      .build();
+
+    unsafe {
+      let framebuffer = logical_device
+        .create_framebuffer(&frame_buffer_create_info, None)
+        .expect("Unable to create framebuffer");
+      framebuffers.push(framebuffer);
+    }
+  }
+
+  framebuffers
 }
 
 #[cfg(test)]
