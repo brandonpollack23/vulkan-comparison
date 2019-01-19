@@ -1,7 +1,7 @@
 pub mod raw_vulkan_helpers;
 mod vulkan;
 
-use self::vulkan::*;
+use self::vulkan::VulkanContext;
 use std::str;
 use winit::{dpi::LogicalSize, Event, EventsLoop, Window, WindowBuilder, WindowEvent};
 
@@ -9,7 +9,7 @@ pub struct HelloTriangleApplication {
   // Window related structures.
   window: Window,
   events_loop: EventsLoop,
-  vulkan_context: VulkanStructures,
+  vulkan_context: VulkanContext,
 }
 
 const WIDTH: u32 = 800;
@@ -27,7 +27,7 @@ impl HelloTriangleApplication {
       .build(&events_loop)
       .expect("Error Creating Window");
 
-    let vulkan_structures = vulkan::VulkanStructures::initialize_vulkan(&window);
+    let vulkan_structures = VulkanContext::initialize_vulkan(&window);
 
     Self {
       window,
