@@ -47,6 +47,7 @@ pub struct VulkanStructures {
   pipeline_structures: VulkanPipelineStructures,
   swap_chain_framebuffers: Vec<vk::Framebuffer>,
   command_structures: VulkanCommandStructures,
+  semaphores: VulkanSemaphores,
 }
 
 // Each extension is wrapped in it's own struct with it's created structures to
@@ -78,6 +79,11 @@ struct VulkanPipelineStructures {
 struct VulkanCommandStructures {
   command_pool: vk::CommandPool,
   command_buffers: Vec<vk::CommandBuffer>,
+}
+
+struct VulkanSemaphores {
+  image_available_sem: vk::Semaphore,
+  render_finished_sem: vk::Semaphore,
 }
 
 // A struct of all the indices of the different queue families a vulkan devices
@@ -114,7 +120,16 @@ struct SwapChainSupportDetails {
 impl Drop for VulkanStructures {
   fn drop(&mut self) {
     unsafe {
-      self.logical_device.destroy_command_pool(self.command_structures.command_pool, None);
+      self
+        .logical_device
+        .destroy_semaphore(self.semaphores.render_finished_sem, None);
+      self
+        .logical_device
+        .destroy_semaphore(self.semaphores.image_available_sem, None);
+
+      self
+        .logical_device
+        .destroy_command_pool(self.command_structures.command_pool, None);
 
       for framebuffer in self.swap_chain_framebuffers.iter() {
         self.logical_device.destroy_framebuffer(*framebuffer, None);
@@ -161,106 +176,226 @@ impl Drop for VulkanStructures {
   }
 }
 
-pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
-  // Entry is the vulkan library loader, it loads the vulkan shared object
-  // (dll/so/etc), and then loads all the function pointers for vulkan versions
-  // 1.0 and 1.1 from that.
-  let entry: Entry = Entry::new().expect("Unable to load Vulkan dll and functions!");
+impl VulkanStructures {
+  pub fn initialize_vulkan(window: &Window) -> VulkanStructures {
+    // Entry is the vulkan library loader, it loads the vulkan shared object
+    // (dll/so/etc), and then loads all the function pointers for vulkan versions
+    // 1.0 and 1.1 from that.
+    let entry: Entry = Entry::new().expect("Unable to load Vulkan dll and functions!");
 
-  // Create the Vulkan instance (ie instantiate the client side driver).
-  let instance = create_instance(&entry);
+    // Create the Vulkan instance (ie instantiate the client side driver).
+    let instance = create_instance(&entry);
 
-  // Set up debug callback, so we can get messages through the Vulkan runtime (via
-  // Rust FFI).
-  let callback_structures = setup_debug_callback(&entry, &instance);
+    // Set up debug callback, so we can get messages through the Vulkan runtime (via
+    // Rust FFI).
+    let callback_structures = setup_debug_callback(&entry, &instance);
 
-  // Surface is actually created before physical device selection because it can
-  // influence it.
-  let surface = unsafe {
-    raw_vulkan_helpers::create_surface(&entry, &instance, window).expect("Could not create surface")
-  };
-  let surface_structures = VulkanSurfaceStructures {
-    surface_extension: extensions::khr::Surface::new(&entry, &instance),
-    surface,
-  };
+    // Surface is actually created before physical device selection because it can
+    // influence it.
+    let surface = unsafe {
+      raw_vulkan_helpers::create_surface(&entry, &instance, window)
+        .expect("Could not create surface")
+    };
+    let surface_structures = VulkanSurfaceStructures {
+      surface_extension: extensions::khr::Surface::new(&entry, &instance),
+      surface,
+    };
 
-  // For now just use the first one, who cares right?  In the future a scoring
-  // system could be used, or a user selection, but anything works atm.
-  let physical_device = get_physical_devices_for_surface_drawing(&instance, &surface_structures)[0];
+    // For now just use the first one, who cares right?  In the future a scoring
+    // system could be used, or a user selection, but anything works atm.
+    let physical_device =
+      get_physical_devices_for_surface_drawing(&instance, &surface_structures)[0];
 
-  // Right now no features are requested, but this will be different by the end of
-  // the tutorial. Later this will include things like vertex shader, geometry
-  // shader, etc.
-  let (logical_device, queue_family_indices) = create_logical_device(
-    &instance,
-    &physical_device,
-    &surface_structures,
-    &vk::PhysicalDeviceFeatures::builder().build(),
-  );
+    // Right now no features are requested, but this will be different by the end of
+    // the tutorial. Later this will include things like vertex shader, geometry
+    // shader, etc.
+    let (logical_device, queue_family_indices) = create_logical_device(
+      &instance,
+      &physical_device,
+      &surface_structures,
+      &vk::PhysicalDeviceFeatures::builder().build(),
+    );
 
-  // Get the queues that were created with the logical device.
-  let graphics_queue = unsafe {
-    logical_device.get_device_queue(queue_family_indices.graphics_queue_family.unwrap(), 0u32)
-  };
-  let present_queue = unsafe {
-    logical_device.get_device_queue(queue_family_indices.present_queue_family.unwrap(), 0u32)
-  };
+    // Get the queues that were created with the logical device.
+    let graphics_queue = unsafe {
+      logical_device.get_device_queue(queue_family_indices.graphics_queue_family.unwrap(), 0u32)
+    };
+    let present_queue = unsafe {
+      logical_device.get_device_queue(queue_family_indices.present_queue_family.unwrap(), 0u32)
+    };
 
-  // Load swap chain extension and create all the structures to use it.
-  let swap_chain_structures = create_swap_chain_structures(
-    &instance,
-    &surface_structures,
-    &physical_device,
-    &logical_device,
-  );
+    // Load swap chain extension and create all the structures to use it.
+    let swap_chain_structures = create_swap_chain_structures(
+      &instance,
+      &surface_structures,
+      &physical_device,
+      &logical_device,
+    );
 
-  // Now that the swapchain is created, we take the handle to the image out of it.
-  let swap_chain_images = unsafe {
-    swap_chain_structures
-      .swap_chain_extension
-      .get_swapchain_images(swap_chain_structures.swap_chain)
-      .expect("Could not get images out of swapchain")
-  };
+    // Now that the swapchain is created, we take the handle to the image out of it.
+    let swap_chain_images = unsafe {
+      swap_chain_structures
+        .swap_chain_extension
+        .get_swapchain_images(swap_chain_structures.swap_chain)
+        .expect("Could not get images out of swapchain")
+    };
 
-  let image_views = create_image_views(&swap_chain_images, &swap_chain_structures, &logical_device);
+    let image_views =
+      create_image_views(&swap_chain_images, &swap_chain_structures, &logical_device);
 
-  let render_pass = create_render_pass(&logical_device, &swap_chain_structures);
+    let render_pass = create_render_pass(&logical_device, &swap_chain_structures);
 
-  // Finally, all the pieces of the Setup and presentation extensions are complete
-  // Now we have to create the graphics pipeline and we'll be done.
-  // NOTE: A new graphics pipeline needs to be constructed from scratch if it is
-  // changed or created to begin with. So every different technique for drawing
-  // etc would need to be created here (EG a regular object draw, a shadow map
-  // pass, an alpha blend of just textures to create a new texture, would all use
-  // slightly different pipeline configurations and need to be recreated).
-  let pipeline_structures =
-    create_graphics_pipeline(&logical_device, &swap_chain_structures, render_pass);
+    // Finally, all the pieces of the Setup and presentation extensions are complete
+    // Now we have to create the graphics pipeline and we'll be done.
+    // NOTE: A new graphics pipeline needs to be constructed from scratch if it is
+    // changed or created to begin with. So every different technique for drawing
+    // etc would need to be created here (EG a regular object draw, a shadow map
+    // pass, an alpha blend of just textures to create a new texture, would all use
+    // slightly different pipeline configurations and need to be recreated).
+    let pipeline_structures =
+      create_graphics_pipeline(&logical_device, &swap_chain_structures, render_pass);
 
-  let swap_chain_framebuffers = create_framebuffers(
-    &logical_device,
-    &image_views,
-    &pipeline_structures,
-    &swap_chain_structures,
-  );
+    let swap_chain_framebuffers = create_framebuffers(
+      &logical_device,
+      &image_views,
+      &pipeline_structures,
+      &swap_chain_structures,
+    );
 
-  let command_structures = create_command_structures(&instance, &physical_device, &logical_device, swap_chain_framebuffers.len(), &surface_structures);
+    let command_structures = create_command_structures(
+      &instance,
+      &physical_device,
+      &logical_device,
+      swap_chain_framebuffers.len(),
+      &surface_structures,
+    );
 
-  let vulkan_structures = VulkanStructures {
-    entry,
-    instance,
-    callback_structures,
-    surface_structures,
-    logical_device,
-    graphics_queue,
-    present_queue,
-    swap_chain_structures,
-    swap_chain_images,
-    image_views,
-    pipeline_structures,
-    swap_chain_framebuffers,
-    command_structures,
-  };
-  vulkan_structures
+    let semaphores = create_semaphores(&logical_device);
+
+    let vulkan_structures = VulkanStructures {
+      entry,
+      instance,
+      callback_structures,
+      surface_structures,
+      logical_device,
+      graphics_queue,
+      present_queue,
+      swap_chain_structures,
+      swap_chain_images,
+      image_views,
+      pipeline_structures,
+      swap_chain_framebuffers,
+      command_structures,
+      semaphores,
+    };
+    vulkan_structures.setup_command_buffers();
+
+    vulkan_structures
+  }
+
+  pub fn draw_frame(&self) {
+    // Steps to success:
+    // 1) Aquire image from swapchain
+    // 2) Execute command buffer with image as attachment in framebuffer
+    // 3) Return image to swapchain for presentation.
+    // 4) fucking finally.
+    unsafe {
+      // 1;  Ignoring whether swapchain is suboptimal for surface.
+      let (image_index, suboptimal_) = self
+        .swap_chain_structures
+        .swap_chain_extension
+        .acquire_next_image(
+          self.swap_chain_structures.swap_chain,
+          std::u64::MAX,
+          self.semaphores.image_available_sem,
+          vk::Fence::null(),
+        )
+        .expect("Could not acquire image!");
+
+      // 2
+      let submit_info = vk::SubmitInfo::builder()
+        .wait_semaphores(&[self.semaphores.image_available_sem])
+        .wait_dst_stage_mask(&[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT]) // Wait until we can draw colors
+        .command_buffers(&[self.command_structures.command_buffers[image_index as usize]])
+        .signal_semaphores(&[self.semaphores.render_finished_sem]) // Signal this when done drawing
+        .build();
+      self
+        .logical_device
+        .queue_submit(self.graphics_queue, &[submit_info], vk::Fence::null())
+        .expect("Failed to submit draw command buffer!");
+
+      // 3
+      let present_info = vk::PresentInfoKHR::builder()
+        .wait_semaphores(&[self.semaphores.render_finished_sem])
+        .swapchains(&[self.swap_chain_structures.swap_chain])
+        .image_indices(&[image_index])
+        .build();
+
+      self
+        .swap_chain_structures
+        .swap_chain_extension
+        .queue_present(self.present_queue, &present_info)
+        .expect("Could not present!");
+    }
+  }
+
+  fn setup_command_buffers(&self) {
+    for i in 0..self.command_structures.command_buffers.len() {
+      let begin_info = vk::CommandBufferBeginInfo::builder()
+        .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE) // Resubmit allowed while pending execution.
+        .build();
+
+      unsafe {
+        self
+          .logical_device
+          .begin_command_buffer(self.command_structures.command_buffers[i], &begin_info)
+          .expect("Could not begin command buffer");
+      }
+
+      let clear_color = vk::ClearValue {
+        color: vk::ClearColorValue {
+          float32: [0f32, 0f32, 0f32, 1f32],
+        },
+      };
+
+      let render_pass_info = vk::RenderPassBeginInfo::builder()
+        .render_pass(self.pipeline_structures.render_pass)
+        .framebuffer(self.swap_chain_framebuffers[i])
+        .render_area(vk::Rect2D {
+          offset: vk::Offset2D { x: 0, y: 0 },
+          extent: self.swap_chain_structures.swap_chain_extent,
+        })
+        .clear_values(&[clear_color])
+        .build();
+
+      unsafe {
+        self.logical_device.cmd_begin_render_pass(
+          self.command_structures.command_buffers[i],
+          &render_pass_info,
+          vk::SubpassContents::INLINE,
+        );
+
+        self.logical_device.cmd_bind_pipeline(
+          self.command_structures.command_buffers[i],
+          vk::PipelineBindPoint::GRAPHICS,
+          self.pipeline_structures.graphics_pipeline,
+        );
+
+        self
+          .logical_device
+          .cmd_draw(self.command_structures.command_buffers[i], 3, 1, 0, 0);
+
+        self
+          .logical_device
+          .cmd_end_render_pass(self.command_structures.command_buffers[i]);
+
+        self
+          .logical_device
+          .end_command_buffer(self.command_structures.command_buffers[i])
+          .expect("Failed to record command buffer!");
+      }
+    }
+  }
 }
 
 fn create_instance(entry: &Entry) -> Instance {
@@ -782,10 +917,10 @@ fn create_image_views(
 ) -> Vec<vk::ImageView> {
   swap_chain_images
     .iter()
-    .map(|image| {
+    .map(|&image| {
       // Leave components default, so no swizzling of rgb
       let image_view_create_info = vk::ImageViewCreateInfo::builder()
-        .image(*image)
+        .image(image)
         .view_type(vk::ImageViewType::TYPE_2D)
         .format(swap_chain_structures.swap_chain_image_format)
         .subresource_range(
@@ -843,17 +978,32 @@ fn create_render_pass(
 
   // Only using the one color attachment, since there's only one subpass for now.
   let attachment_reference = vk::AttachmentReference::builder()
-    .attachment(0u32)
     .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
     .build();
+
   let subpass = vk::SubpassDescription::builder()
     .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
     .color_attachments(&[attachment_reference]) // Index here is the layout parameter in outputs in shaders.
     .build();
 
+  // Set up IMPLICIT subpass dependencies that specefy memory and execution
+  // dependencies between subpasses.  There are implicit subpasses around our
+  // single subpass.
+  let dependency = vk::SubpassDependency::builder()
+    .src_subpass(vk::SUBPASS_EXTERNAL) // Dependency subpass (implicit subpass before or after render pass, here before.
+    .dst_subpass(0) // Dependent subpass (0th one is the only one).
+    .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+    //    .src_access_mask() // no src access flags.
+    .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+    .dst_access_mask(
+      vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+    ) // Prevent transition of stages until read and write is available on Color attachment stage.
+    .build();
+
   let render_pass_create_info = vk::RenderPassCreateInfo::builder()
     .attachments(&[color_attachment])
     .subpasses(&[subpass])
+    .dependencies(&[dependency])
     .build();
 
   unsafe {
@@ -955,6 +1105,7 @@ fn create_graphics_pipeline(
       .polygon_mode(vk::PolygonMode::FILL) // Line mode, fill mode, etc.
       .line_width(1.0f32) // Default line width in fragments, anything more than 1 requires enabling the GPU feature.
       .cull_mode(vk::CullModeFlags::BACK) // cull back faces.
+      .front_face(vk::FrontFace::CLOCKWISE) // Vertex order for a vertex to be considered "front facing" (used for back face culling for example).
       .depth_bias_enable(false) // Depth bias can alter depth values by adding a bias, used for shadow mapping sometimes.
       .depth_bias_constant_factor(0f32)
       .depth_bias_clamp(0f32)
@@ -1084,7 +1235,13 @@ fn create_framebuffers(
   framebuffers
 }
 
-fn create_command_structures(instance: &Instance, device: &vk::PhysicalDevice, logical_device: &Device, num_framebuffers: usize, surface_structures: &VulkanSurfaceStructures) -> VulkanCommandStructures {
+fn create_command_structures(
+  instance: &Instance,
+  device: &vk::PhysicalDevice,
+  logical_device: &Device,
+  num_framebuffers: usize,
+  surface_structures: &VulkanSurfaceStructures,
+) -> VulkanCommandStructures {
   let queue_family_indices = find_queue_families(instance, device, surface_structures);
 
   let command_pool_create_info = vk::CommandPoolCreateInfo::builder()
@@ -1092,7 +1249,9 @@ fn create_command_structures(instance: &Instance, device: &vk::PhysicalDevice, l
     .build();
 
   unsafe {
-    let command_pool = logical_device.create_command_pool(&command_pool_create_info, None).expect("Could not create command pool");
+    let command_pool = logical_device
+      .create_command_pool(&command_pool_create_info, None)
+      .expect("Could not create command pool");
     let command_buffers = create_command_buffers(logical_device, num_framebuffers, command_pool);
 
     VulkanCommandStructures {
@@ -1102,7 +1261,11 @@ fn create_command_structures(instance: &Instance, device: &vk::PhysicalDevice, l
   }
 }
 
-fn create_command_buffers(logical_device: &Device, num_framebuffers: usize, command_pool: vk::CommandPool) -> Vec<vk::CommandBuffer> {
+fn create_command_buffers(
+  logical_device: &Device,
+  num_framebuffers: usize,
+  command_pool: vk::CommandPool,
+) -> Vec<vk::CommandBuffer> {
   let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
     .command_pool(command_pool)
     .level(vk::CommandBufferLevel::PRIMARY)
@@ -1110,7 +1273,26 @@ fn create_command_buffers(logical_device: &Device, num_framebuffers: usize, comm
     .build();
 
   unsafe {
-    logical_device.allocate_command_buffers(&command_buffer_allocate_info).expect("Could not allocate command buffer!")
+    logical_device
+      .allocate_command_buffers(&command_buffer_allocate_info)
+      .expect("Could not allocate command buffer!")
+  }
+}
+
+fn create_semaphores(logical_device: &Device) -> VulkanSemaphores {
+  let sem_create_info = vk::SemaphoreCreateInfo::default();
+  unsafe {
+    let image_available_sem = logical_device
+      .create_semaphore(&sem_create_info, None)
+      .expect("Failed to create semaphore!");
+    let render_finished_sem = logical_device
+      .create_semaphore(&sem_create_info, None)
+      .expect("Failed to create semaphore!");
+
+    VulkanSemaphores {
+      image_available_sem,
+      render_finished_sem,
+    }
   }
 }
 
@@ -1123,7 +1305,7 @@ mod tests {
   #[test]
   fn test_vulkan_initializes_without_crashing() {
     let window = create_window();
-    initialize_vulkan(&window);
+    VulkanStructures::initialize_vulkan(&window);
   }
 
   fn create_window() -> Window {

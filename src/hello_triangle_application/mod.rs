@@ -27,7 +27,7 @@ impl HelloTriangleApplication {
       .build(&events_loop)
       .expect("Error Creating Window");
 
-    let vulkan_structures = vulkan::initialize_vulkan(&window);
+    let vulkan_structures = vulkan::VulkanStructures::initialize_vulkan(&window);
 
     Self {
       window,
@@ -46,6 +46,8 @@ impl HelloTriangleApplication {
         } => done = true,
         _ => (),
       });
+
+      self.vulkan_structures.draw_frame();
 
       if done {
         return;
