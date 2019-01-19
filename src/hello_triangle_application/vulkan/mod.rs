@@ -339,6 +339,12 @@ impl VulkanStructures {
     }
   }
 
+  pub fn wait_for_idle(&self) {
+    unsafe {
+      self.logical_device.device_wait_idle();
+    }
+  }
+
   fn setup_command_buffers(&self) {
     for i in 0..self.command_structures.command_buffers.len() {
       let begin_info = vk::CommandBufferBeginInfo::builder()
@@ -1105,7 +1111,8 @@ fn create_graphics_pipeline(
       .polygon_mode(vk::PolygonMode::FILL) // Line mode, fill mode, etc.
       .line_width(1.0f32) // Default line width in fragments, anything more than 1 requires enabling the GPU feature.
       .cull_mode(vk::CullModeFlags::BACK) // cull back faces.
-      .front_face(vk::FrontFace::CLOCKWISE) // Vertex order for a vertex to be considered "front facing" (used for back face culling for example).
+      .front_face(vk::FrontFace::CLOCKWISE) // Vertex order for a vertex to be considered "front facing" (used for back face culling for
+      // example).
       .depth_bias_enable(false) // Depth bias can alter depth values by adding a bias, used for shadow mapping sometimes.
       .depth_bias_constant_factor(0f32)
       .depth_bias_clamp(0f32)

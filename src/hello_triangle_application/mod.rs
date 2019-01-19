@@ -9,7 +9,7 @@ pub struct HelloTriangleApplication {
   // Window related structures.
   window: Window,
   events_loop: EventsLoop,
-  vulkan_structures: VulkanStructures,
+  vulkan_context: VulkanStructures,
 }
 
 const WIDTH: u32 = 800;
@@ -32,13 +32,13 @@ impl HelloTriangleApplication {
     Self {
       window,
       events_loop,
-      vulkan_structures,
+      vulkan_context: vulkan_structures,
     }
   }
 
   pub fn main_loop(&mut self) {
-    loop {
-      let mut done = false;
+    let mut done = false;
+    while !done {
       self.events_loop.poll_events(|ev| match ev {
         Event::WindowEvent {
           event: WindowEvent::CloseRequested,
@@ -47,11 +47,11 @@ impl HelloTriangleApplication {
         _ => (),
       });
 
-      self.vulkan_structures.draw_frame();
-
-      if done {
-        return;
-      }
+      self.vulkan_context.draw_frame();
     }
+
+    // Wait for idle before exiting to prevent stomping currently ongoing
+    // drawing/presentation operations.
+    self.vulkan_context.wait_for_idle();
   }
 }
