@@ -32,6 +32,9 @@ const ENABLE_VALIDATION_LAYERS: bool = true;
 #[cfg(not(debug_assertions))]
 const ENABLE_VALIDATION_LAYERS: bool = false;
 
+// TODO make param.
+pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
 // A struct of all the indices of the different queue families a vulkan devices
 // supports.
 #[derive(Default, Debug)]
@@ -942,19 +945,42 @@ pub fn create_command_buffers(
   }
 }
 
-pub fn create_semaphores(logical_device: &Device) -> VulkanSemaphores {
-  let sem_create_info = vk::SemaphoreCreateInfo::default();
-  unsafe {
-    let image_available_sem = logical_device
-      .create_semaphore(&sem_create_info, None)
-      .expect("Failed to create semaphore!");
-    let render_finished_sem = logical_device
-      .create_semaphore(&sem_create_info, None)
-      .expect("Failed to create semaphore!");
+pub fn create_sync_objects(logical_device: &Device) -> VulkanSynchronization {
+  unsafe fn create_sems(d: &Device) -> Vec<vk::Semaphore> {
+    let mut res = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+    let sem_create_info = vk::SemaphoreCreateInfo::default();
 
-    VulkanSemaphores {
-      image_available_sem,
-      render_finished_sem,
+    for _ in 0..MAX_FRAMES_IN_FLIGHT {
+      let sem = d
+        .create_semaphore(&sem_create_info, None)
+        .expect("Failed to create semaphore!");
+      res.push(sem);
+    }
+
+    res
+  }
+
+  unsafe fn create_fences(d: &Device) -> Vec<vk::Fence> {
+    let mut res = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+    let fence_create_info = vk::FenceCreateInfo::builder()
+      .flags(vk::FenceCreateFlags::SIGNALED) // Set signaled by default, since there is nothing to wait on, nothing submitted to draw yet.
+      .build();
+
+    for _ in 0..MAX_FRAMES_IN_FLIGHT {
+      let fence = d
+        .create_fence(&fence_create_info, None)
+        .expect("Failed to create fence!");
+      res.push(fence);
+    }
+
+    res
+  }
+
+  unsafe {
+    VulkanSynchronization {
+      image_available_sems: create_sems(logical_device),
+      render_finished_sems: create_sems(logical_device),
+      in_flight_fences: create_fences(logical_device),
     }
   }
 }

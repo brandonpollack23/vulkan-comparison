@@ -21,7 +21,8 @@ pub struct VulkanContextInner {
   pub pipeline_structures: VulkanPipelineStructures,
   pub swap_chain_framebuffers: Vec<vk::Framebuffer>,
   pub command_structures: VulkanCommandStructures,
-  pub semaphores: VulkanSemaphores,
+  pub synchronization: VulkanSynchronization,
+  pub in_flight_frame_index: usize,
 }
 
 // Each extension is wrapped in it's own struct with it's created structures to
@@ -55,9 +56,10 @@ pub struct VulkanCommandStructures {
   pub command_buffers: Vec<vk::CommandBuffer>,
 }
 
-pub struct VulkanSemaphores {
-  pub image_available_sem: vk::Semaphore,
-  pub render_finished_sem: vk::Semaphore,
+pub struct VulkanSynchronization {
+  pub image_available_sems: Vec<vk::Semaphore>,
+  pub render_finished_sems: Vec<vk::Semaphore>,
+  pub in_flight_fences: Vec<vk::Fence>,
 }
 
 // Have to manually deallocate (vkDestroyInstance, destroy debug utils) etc.
@@ -71,11 +73,26 @@ impl Drop for VulkanContextInner {
   fn drop(&mut self) {
     unsafe {
       self
-        .logical_device
-        .destroy_semaphore(self.semaphores.render_finished_sem, None);
+        .synchronization
+        .render_finished_sems
+        .iter()
+        .for_each(|&sem| {
+          self.logical_device.destroy_semaphore(sem, None);
+        });
       self
-        .logical_device
-        .destroy_semaphore(self.semaphores.image_available_sem, None);
+        .synchronization
+        .image_available_sems
+        .iter()
+        .for_each(|&sem| {
+          self.logical_device.destroy_semaphore(sem, None);
+        });
+      self
+        .synchronization
+        .in_flight_fences
+        .iter()
+        .for_each(|&fence| {
+          self.logical_device.destroy_fence(fence, None);
+        });
 
       self
         .logical_device
@@ -220,7 +237,7 @@ impl VulkanContext {
       &surface_structures,
     );
 
-    let semaphores = create_semaphores(&logical_device);
+    let semaphores = create_sync_objects(&logical_device);
 
     let vulkan_context = VulkanContextInner {
       entry,
@@ -236,7 +253,8 @@ impl VulkanContext {
       pipeline_structures,
       swap_chain_framebuffers,
       command_structures,
-      semaphores,
+      synchronization: semaphores,
+      in_flight_frame_index: 0,
     };
 
     setup_command_buffers(&vulkan_context);
@@ -246,14 +264,30 @@ impl VulkanContext {
     }
   }
 
-  pub fn draw_frame(&self) {
-    let inner = &self.inner;
+  pub fn draw_frame(&mut self) {
+    let inner = &mut self.inner;
+    let device = &inner.logical_device;
+    let synchronization = &inner.synchronization;
+    let in_flight_frame_index = inner.in_flight_frame_index;
     // Steps to success:
-    // 1) Aquire image from swapchain
+    // 0) Wait for fence of currently in flight frame.  This is to limit resource
+    // use on queued draw calls. 1) Aquire image from swapchain
     // 2) Execute command buffer with image as attachment in framebuffer
     // 3) Return image to swapchain for presentation.
     // 4) fucking finally.
     unsafe {
+      // 0
+      device
+        .wait_for_fences(
+          &[synchronization.in_flight_fences[in_flight_frame_index]],
+          true,
+          std::u64::MAX,
+        )
+        .expect("Error waiting for fences!");
+      device
+        .reset_fences(&[synchronization.in_flight_fences[in_flight_frame_index]])
+        .expect("Error resetting fences");
+
       // 1;  Ignoring whether swapchain is suboptimal for surface.
       let (image_index, suboptimal_) = inner
         .swap_chain_structures
@@ -261,26 +295,29 @@ impl VulkanContext {
         .acquire_next_image(
           inner.swap_chain_structures.swap_chain,
           std::u64::MAX,
-          inner.semaphores.image_available_sem,
+          synchronization.image_available_sems[in_flight_frame_index],
           vk::Fence::null(),
         )
         .expect("Could not acquire image!");
 
       // 2
       let submit_info = vk::SubmitInfo::builder()
-        .wait_semaphores(&[inner.semaphores.image_available_sem])
+        .wait_semaphores(&[synchronization.image_available_sems[in_flight_frame_index]])
         .wait_dst_stage_mask(&[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT]) // Wait until we can draw colors
         .command_buffers(&[inner.command_structures.command_buffers[image_index as usize]])
-        .signal_semaphores(&[inner.semaphores.render_finished_sem]) // Signal this when done drawing
+        .signal_semaphores(&[synchronization.render_finished_sems[in_flight_frame_index]]) // Signal this when done drawing
         .build();
-      inner
-        .logical_device
-        .queue_submit(inner.graphics_queue, &[submit_info], vk::Fence::null())
+      device
+        .queue_submit(
+          inner.graphics_queue,
+          &[submit_info],
+          synchronization.in_flight_fences[in_flight_frame_index],
+        ) //last param is a fence which is signaled when the submitted work is completed.
         .expect("Failed to submit draw command buffer!");
 
       // 3
       let present_info = vk::PresentInfoKHR::builder()
-        .wait_semaphores(&[inner.semaphores.render_finished_sem])
+        .wait_semaphores(&[synchronization.render_finished_sems[in_flight_frame_index]])
         .swapchains(&[inner.swap_chain_structures.swap_chain])
         .image_indices(&[image_index])
         .build();
@@ -291,6 +328,8 @@ impl VulkanContext {
         .queue_present(inner.present_queue, &present_info)
         .expect("Could not present!");
     }
+
+    inner.in_flight_frame_index = (inner.in_flight_frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
   }
 
   pub fn wait_for_idle(&self) {
