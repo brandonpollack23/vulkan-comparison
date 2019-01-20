@@ -19,6 +19,7 @@ use std::ffi::CStr;
 use std::fs;
 use std::os::raw::c_char;
 use std::str;
+use winit::Window;
 
 const VALIDATION_LAYERS_CSTR: &'static [&'static [u8]] =
   &[b"VK_LAYER_LUNARG_standard_validation\0"];
@@ -191,6 +192,18 @@ pub fn setup_debug_callback(entry: &Entry, instance: &Instance) -> Option<Callba
       debug_callback_structure,
     })
   }
+}
+
+pub fn create_surface_structures(window: &Window, entry: &Entry, instance: &Instance) -> VulkanSurfaceStructures {
+  let surface = unsafe {
+    raw_vulkan_helpers::create_surface(entry, instance, window)
+      .expect("Could not create surface")
+  };
+  let surface_structures = VulkanSurfaceStructures {
+    surface_extension: extensions::khr::Surface::new(entry, instance),
+    surface,
+  };
+  surface_structures
 }
 
 pub fn get_physical_devices_for_surface_drawing(

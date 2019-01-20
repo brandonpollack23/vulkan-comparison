@@ -159,14 +159,7 @@ impl VulkanContext {
 
     // Surface is actually created before physical device selection because it can
     // influence it.
-    let surface = unsafe {
-      raw_vulkan_helpers::create_surface(&entry, &instance, window)
-        .expect("Could not create surface")
-    };
-    let surface_structures = VulkanSurfaceStructures {
-      surface_extension: extensions::khr::Surface::new(&entry, &instance),
-      surface,
-    };
+    let surface_structures = create_surface_structures(window, &entry, &instance);
 
     // For now just use the first one, who cares right?  In the future a scoring
     // system could be used, or a user selection, but anything works atm.
