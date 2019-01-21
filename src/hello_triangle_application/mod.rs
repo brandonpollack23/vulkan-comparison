@@ -42,6 +42,8 @@ impl HelloTriangleApplication {
   pub fn main_loop(&mut self) {
     let mut done = false;
     let mut resized = false;
+    let mut enable_draw = true;
+
     let window = &self.window;
     let vulkan_context = &mut self.vulkan_context;
 
@@ -50,15 +52,27 @@ impl HelloTriangleApplication {
         Event::WindowEvent {
           event: WindowEvent::CloseRequested,
           ..
-        } => done = true,
+        } => {
+          done = true;
+        },
         Event::WindowEvent {
           event: WindowEvent::Resized(new_size),
           ..
-        } => resized = true,
+        } => {
+          if new_size.width == 0f64 || new_size.height == 0f64 {
+            // Minimize.
+            enable_draw = false;
+          } else {
+            enable_draw = true;
+          }
+          resized = true;
+        },
         _ => (),
       });
 
-      vulkan_context.draw_frame(window, &mut resized);
+      if enable_draw {
+        vulkan_context.draw_frame(window, &mut resized);
+      }
     }
 
     // Wait for idle before exiting to prevent stomping currently ongoing
