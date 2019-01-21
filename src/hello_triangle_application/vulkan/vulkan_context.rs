@@ -1,7 +1,7 @@
 use crate::hello_triangle_application::raw_vulkan_helpers;
 use crate::hello_triangle_application::vulkan::initialization_helpers::*;
 use ash::{extensions, version::DeviceV1_0, version::InstanceV1_0, vk, Device, Entry, Instance};
-use winit::Window;
+use winit::{dpi::LogicalSize, Window};
 
 pub struct VulkanContext {
   inner: VulkanContextInner,
@@ -12,11 +12,12 @@ pub struct VulkanContextInner {
   pub instance: Instance,
   pub callback_structures: Option<CallbackStructures>,
   pub surface_structures: VulkanSurfaceStructures,
+  pub physical_device: vk::PhysicalDevice,
   pub logical_device: Device,
   pub graphics_queue: vk::Queue,
   pub present_queue: vk::Queue,
+  pub swap_chain_extension: extensions::khr::Swapchain,
   pub swap_chain_structures: VulkanSwapChainStructures,
-  pub swap_chain_images: Vec<vk::Image>,
   pub image_views: Vec<vk::ImageView>,
   pub pipeline_structures: VulkanPipelineStructures,
   pub swap_chain_framebuffers: Vec<vk::Framebuffer>,
@@ -39,7 +40,6 @@ pub struct VulkanSurfaceStructures {
 }
 
 pub struct VulkanSwapChainStructures {
-  pub swap_chain_extension: extensions::khr::Swapchain,
   pub swap_chain: vk::SwapchainKHR,
   pub swap_chain_image_format: vk::Format,
   pub swap_chain_extent: vk::Extent2D,
@@ -72,6 +72,8 @@ pub struct VulkanSynchronization {
 impl Drop for VulkanContextInner {
   fn drop(&mut self) {
     unsafe {
+      cleanup_swap_chain(self);
+
       self
         .synchronization
         .render_finished_sems
@@ -97,31 +99,6 @@ impl Drop for VulkanContextInner {
       self
         .logical_device
         .destroy_command_pool(self.command_structures.command_pool, None);
-
-      for framebuffer in self.swap_chain_framebuffers.iter() {
-        self.logical_device.destroy_framebuffer(*framebuffer, None);
-      }
-
-      self
-        .logical_device
-        .destroy_pipeline(self.pipeline_structures.graphics_pipeline, None);
-
-      self
-        .logical_device
-        .destroy_render_pass(self.pipeline_structures.render_pass, None);
-
-      self
-        .logical_device
-        .destroy_pipeline_layout(self.pipeline_structures.pipeline_layout, None);
-
-      self.image_views.iter().for_each(|image_view| {
-        self.logical_device.destroy_image_view(*image_view, None);
-      });
-
-      self
-        .swap_chain_structures
-        .swap_chain_extension
-        .destroy_swapchain(self.swap_chain_structures.swap_chain, None);
 
       self
         .surface_structures
@@ -185,25 +162,21 @@ impl VulkanContext {
     };
 
     // Load swap chain extension and create all the structures to use it.
+    let swap_chain_extension = extensions::khr::Swapchain::new(&instance, &logical_device);
     let swap_chain_structures = create_swap_chain_structures(
       &instance,
       &surface_structures,
       &physical_device,
-      &logical_device,
+      &swap_chain_extension,
+      window.get_inner_size().unwrap(),
     );
 
     // Now that the swapchain is created, we take the handle to the image out of it.
-    let swap_chain_images = unsafe {
-      swap_chain_structures
-        .swap_chain_extension
-        .get_swapchain_images(swap_chain_structures.swap_chain)
-        .expect("Could not get images out of swapchain")
-    };
-
-    let image_views =
-      create_image_views(&swap_chain_images, &swap_chain_structures, &logical_device);
-
-    let render_pass = create_render_pass(&logical_device, &swap_chain_structures);
+    let image_views = create_image_views(
+      &swap_chain_extension,
+      &swap_chain_structures,
+      &logical_device,
+    );
 
     // Finally, all the pieces of the Setup and presentation extensions are complete
     // Now we have to create the graphics pipeline and we'll be done.
@@ -212,6 +185,10 @@ impl VulkanContext {
     // etc would need to be created here (EG a regular object draw, a shadow map
     // pass, an alpha blend of just textures to create a new texture, would all use
     // slightly different pipeline configurations and need to be recreated).
+
+    // Render pass is just moved right in, but more fine customization might be
+    // needed later so i won't move it into create_render_pass.
+    let render_pass = create_render_pass(&logical_device, &swap_chain_structures);
     let pipeline_structures =
       create_graphics_pipeline(&logical_device, &swap_chain_structures, render_pass);
 
@@ -237,11 +214,12 @@ impl VulkanContext {
       instance,
       callback_structures,
       surface_structures,
+      physical_device,
       logical_device,
       graphics_queue,
       present_queue,
+      swap_chain_extension,
       swap_chain_structures,
-      swap_chain_images,
       image_views,
       pipeline_structures,
       swap_chain_framebuffers,
@@ -257,11 +235,10 @@ impl VulkanContext {
     }
   }
 
-  pub fn draw_frame(&mut self) {
-    let inner = &mut self.inner;
-    let device = &inner.logical_device;
-    let synchronization = &inner.synchronization;
-    let in_flight_frame_index = inner.in_flight_frame_index;
+  pub fn draw_frame(&mut self, window: &Window, framebuffer_resized: &mut bool) {
+    let device = &self.inner.logical_device;
+    let synchronization = &self.inner.synchronization;
+    let in_flight_frame_index = self.inner.in_flight_frame_index;
     // Steps to success:
     // 0) Wait for fence of currently in flight frame.  This is to limit resource
     // use on queued draw calls. 1) Aquire image from swapchain
@@ -277,32 +254,41 @@ impl VulkanContext {
           std::u64::MAX,
         )
         .expect("Error waiting for fences!");
+
+      // 1;  Ignoring whether swapchain is suboptimal for surface.
+      let next_image_result = self.inner.swap_chain_extension.acquire_next_image(
+        self.inner.swap_chain_structures.swap_chain,
+        std::u64::MAX,
+        synchronization.image_available_sems[in_flight_frame_index],
+        vk::Fence::null(),
+      );
+
+      let (image_index, suboptimal_) = match next_image_result {
+        Ok(res) => res,
+        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+          self.recreate_swap_chain(window.get_inner_size().unwrap());
+          return;
+        }
+        Err(_) => panic!("Unable to acquire next image!"),
+      };
+
+      // Reset the fences before submitting the next queue, but after we're certain
+      // we'll draw.
       device
         .reset_fences(&[synchronization.in_flight_fences[in_flight_frame_index]])
         .expect("Error resetting fences");
-
-      // 1;  Ignoring whether swapchain is suboptimal for surface.
-      let (image_index, suboptimal_) = inner
-        .swap_chain_structures
-        .swap_chain_extension
-        .acquire_next_image(
-          inner.swap_chain_structures.swap_chain,
-          std::u64::MAX,
-          synchronization.image_available_sems[in_flight_frame_index],
-          vk::Fence::null(),
-        )
-        .expect("Could not acquire image!");
 
       // 2
       let submit_info = vk::SubmitInfo::builder()
         .wait_semaphores(&[synchronization.image_available_sems[in_flight_frame_index]])
         .wait_dst_stage_mask(&[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT]) // Wait until we can draw colors
-        .command_buffers(&[inner.command_structures.command_buffers[image_index as usize]])
+        .command_buffers(&[self.inner.command_structures.command_buffers[image_index as usize]])
         .signal_semaphores(&[synchronization.render_finished_sems[in_flight_frame_index]]) // Signal this when done drawing
         .build();
+
       device
         .queue_submit(
-          inner.graphics_queue,
+          self.inner.graphics_queue,
           &[submit_info],
           synchronization.in_flight_fences[in_flight_frame_index],
         ) //last param is a fence which is signaled when the submitted work is completed.
@@ -311,18 +297,29 @@ impl VulkanContext {
       // 3
       let present_info = vk::PresentInfoKHR::builder()
         .wait_semaphores(&[synchronization.render_finished_sems[in_flight_frame_index]])
-        .swapchains(&[inner.swap_chain_structures.swap_chain])
+        .swapchains(&[self.inner.swap_chain_structures.swap_chain])
         .image_indices(&[image_index])
         .build();
 
-      inner
-        .swap_chain_structures
+      let present_result = self
+        .inner
         .swap_chain_extension
-        .queue_present(inner.present_queue, &present_info)
-        .expect("Could not present!");
+        .queue_present(self.inner.present_queue, &present_info);
+
+      let should_recreate_swapchain = match present_result {
+        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Ok(true) => true,
+        Ok(false) => false,
+        _ => panic!("Could not present to queue!"),
+      };
+
+      if should_recreate_swapchain || *framebuffer_resized {
+        *framebuffer_resized = false;
+        self.recreate_swap_chain(window.get_inner_size().unwrap());
+      }
     }
 
-    inner.in_flight_frame_index = (inner.in_flight_frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
+    self.inner.in_flight_frame_index =
+      (self.inner.in_flight_frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
   }
 
   pub fn wait_for_idle(&self) {
@@ -334,4 +331,95 @@ impl VulkanContext {
         .expect("Could not wait for idle!");
     }
   }
+
+  unsafe fn recreate_swap_chain(&mut self, new_size: LogicalSize) {
+    self.inner.logical_device.device_wait_idle();
+
+    let inner = &mut self.inner;
+
+    cleanup_swap_chain(inner);
+
+    let instance = &inner.instance;
+    let surface_structures = &inner.surface_structures;
+    let physical_device = &inner.physical_device;
+    let logical_device = &inner.logical_device;
+    let command_structures = &inner.command_structures;
+
+    inner.swap_chain_structures = create_swap_chain_structures(
+      instance,
+      surface_structures,
+      physical_device,
+      &inner.swap_chain_extension,
+      new_size,
+    );
+    inner.image_views = create_image_views(
+      &inner.swap_chain_extension,
+      &inner.swap_chain_structures,
+      logical_device,
+    );
+    inner.pipeline_structures.render_pass =
+      create_render_pass(logical_device, &inner.swap_chain_structures);
+    inner.pipeline_structures = create_graphics_pipeline(
+      logical_device,
+      &inner.swap_chain_structures,
+      inner.pipeline_structures.render_pass,
+    );
+    inner.swap_chain_framebuffers = create_framebuffers(
+      logical_device,
+      &inner.image_views,
+      &inner.pipeline_structures,
+      &inner.swap_chain_structures,
+    );
+    inner.command_structures.command_buffers = create_command_buffers(
+      logical_device,
+      inner.swap_chain_framebuffers.len(),
+      command_structures.command_pool,
+    );
+
+    setup_command_buffers(inner);
+  }
+}
+
+unsafe fn cleanup_swap_chain(vulkan_context_inner: &mut VulkanContextInner) {
+  vulkan_context_inner.logical_device.free_command_buffers(
+    vulkan_context_inner.command_structures.command_pool,
+    &vulkan_context_inner.command_structures.command_buffers,
+  );
+  vulkan_context_inner
+    .command_structures
+    .command_buffers
+    .clear();
+
+  for framebuffer in vulkan_context_inner.swap_chain_framebuffers.iter() {
+    vulkan_context_inner
+      .logical_device
+      .destroy_framebuffer(*framebuffer, None);
+  }
+
+  vulkan_context_inner.logical_device.destroy_pipeline(
+    vulkan_context_inner.pipeline_structures.graphics_pipeline,
+    None,
+  );
+
+  vulkan_context_inner.logical_device.destroy_pipeline_layout(
+    vulkan_context_inner.pipeline_structures.pipeline_layout,
+    None,
+  );
+
+  vulkan_context_inner
+    .logical_device
+    .destroy_render_pass(vulkan_context_inner.pipeline_structures.render_pass, None);
+
+  vulkan_context_inner
+    .image_views
+    .iter()
+    .for_each(|image_view| {
+      vulkan_context_inner
+        .logical_device
+        .destroy_image_view(*image_view, None);
+    });
+
+  vulkan_context_inner
+    .swap_chain_extension
+    .destroy_swapchain(vulkan_context_inner.swap_chain_structures.swap_chain, None);
 }

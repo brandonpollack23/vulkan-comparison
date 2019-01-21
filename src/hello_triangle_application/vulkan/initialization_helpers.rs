@@ -1,8 +1,6 @@
 use super::vulkan_context::*;
 use super::TITLE_BYTES;
 use crate::hello_triangle_application::raw_vulkan_helpers;
-use crate::hello_triangle_application::HEIGHT;
-use crate::hello_triangle_application::WIDTH;
 use ash::util::*;
 use ash::{
   extensions,
@@ -19,7 +17,7 @@ use std::ffi::CStr;
 use std::fs;
 use std::os::raw::c_char;
 use std::str;
-use winit::Window;
+use winit::{dpi::LogicalSize, Window};
 
 const VALIDATION_LAYERS_CSTR: &'static [&'static [u8]] =
   &[b"VK_LAYER_LUNARG_standard_validation\0"];
@@ -194,10 +192,13 @@ pub fn setup_debug_callback(entry: &Entry, instance: &Instance) -> Option<Callba
   }
 }
 
-pub fn create_surface_structures(window: &Window, entry: &Entry, instance: &Instance) -> VulkanSurfaceStructures {
+pub fn create_surface_structures(
+  window: &Window,
+  entry: &Entry,
+  instance: &Instance,
+) -> VulkanSurfaceStructures {
   let surface = unsafe {
-    raw_vulkan_helpers::create_surface(entry, instance, window)
-      .expect("Could not create surface")
+    raw_vulkan_helpers::create_surface(entry, instance, window).expect("Could not create surface")
   };
   let surface_structures = VulkanSurfaceStructures {
     surface_extension: extensions::khr::Surface::new(entry, instance),
@@ -382,26 +383,29 @@ pub fn choose_swap_present_mode(
   return vk::PresentModeKHR::FIFO;
 }
 
-// TODO forward WIDTH and HEIGHT as params.
 // This selects the resolution of the swap chain images, almost always equal to
 // the resolution of the window. The range of possible resolutions is defined in
 // this structure.
-pub fn choose_swap_extent(capabilites: &vk::SurfaceCapabilitiesKHR) -> vk::Extent2D {
+pub fn choose_swap_extent(
+  capabilites: &vk::SurfaceCapabilitiesKHR,
+  width: u32,
+  height: u32,
+) -> vk::Extent2D {
   if capabilites.current_extent.width != std::u32::MAX {
     return capabilites.current_extent;
   }
-  // Some window managers set current widht and height to max positive value to
+  // Some window managers set current width and height to max positive value to
   // indicate that we
   // can select any resolution we want.  In that case I just want to put in the
   // resolution within the max extents that matches the window
   vk::Extent2D {
     width: std::cmp::max(
       capabilites.min_image_extent.width,
-      std::cmp::min(capabilites.max_image_extent.width, WIDTH),
+      std::cmp::min(capabilites.max_image_extent.width, width),
     ),
     height: std::cmp::max(
       capabilites.min_image_extent.height,
-      std::cmp::min(capabilites.max_image_extent.height, HEIGHT),
+      std::cmp::min(capabilites.max_image_extent.height, height),
     ),
   }
 }
@@ -512,13 +516,15 @@ pub fn queue_vec_already_contains_index(
     .any(|x| x == index)
 }
 
+// TODO w/h as a single param struct.
 pub fn create_swap_chain_structures(
   instance: &Instance,
   surface_structures: &VulkanSurfaceStructures,
   physical_device: &vk::PhysicalDevice,
-  logical_device: &Device,
+  swap_chain_extension: &extensions::khr::Swapchain,
+  window_size: LogicalSize,
 ) -> VulkanSwapChainStructures {
-  let swap_chain_extension = extensions::khr::Swapchain::new(instance, logical_device);
+  let LogicalSize { width, height } = window_size;
   // Create the swap chain so that we have something to use to draw to the
   // surface. There are thrree major properties of a swap chain that we will
   // also configure: Surface Format, Presentation Mode, and Swap Extent,
@@ -526,9 +532,12 @@ pub fn create_swap_chain_structures(
   let swap_chain_support_details = query_swapchain_support(&surface_structures, &physical_device);
   let surface_format = choose_swap_surface_format(&swap_chain_support_details.formats);
   let present_mode = choose_swap_present_mode(&swap_chain_support_details.present_modes);
-  let extent = choose_swap_extent(&swap_chain_support_details.capabilities);
+  let extent = choose_swap_extent(
+    &swap_chain_support_details.capabilities,
+    width as u32,
+    height as u32,
+  );
   let image_count = choose_swap_image_count(&swap_chain_support_details.capabilities);
-
   // If a window is resized etc, the swapchain needs to be recreated.  This is too
   // hard for now and we'll leave it for a TODO. Next we specify what happens if
   // we're using multiple command queues (one for graphics and one for presenting)
@@ -537,7 +546,6 @@ pub fn create_swap_chain_structures(
   // Sharing Mode Concurrent, images can be used across queue families without
   // explicit ownership.
   let indices = find_queue_families(&instance, &physical_device, &surface_structures);
-
   let image_sharing_mode;
   let queue_family_indices;
   if indices.graphics_queue_family != indices.present_queue_family {
@@ -554,7 +562,7 @@ pub fn create_swap_chain_structures(
     queue_family_indices = vec![];
   }
 
-  let swap_chain_create_info_builder = vk::SwapchainCreateInfoKHR::builder()
+  let swap_chain_create_info = vk::SwapchainCreateInfoKHR::builder()
     .min_image_count(image_count)
     .image_format(surface_format.format)
     .image_color_space(surface_format.color_space)
@@ -572,16 +580,16 @@ pub fn create_swap_chain_structures(
     .old_swapchain(vk::SwapchainKHR::null())
     .image_sharing_mode(image_sharing_mode)
     .queue_family_indices(&queue_family_indices)
-    .surface(surface_structures.surface);
+    .surface(surface_structures.surface)
+    .build();
 
   let swap_chain = unsafe {
     swap_chain_extension
-      .create_swapchain(&swap_chain_create_info_builder.build(), None)
+      .create_swapchain(&swap_chain_create_info, None)
       .expect("Could not create swapchain")
   };
 
   VulkanSwapChainStructures {
-    swap_chain_extension,
     swap_chain,
     swap_chain_image_format: surface_format.format,
     swap_chain_extent: extent,
@@ -589,10 +597,16 @@ pub fn create_swap_chain_structures(
 }
 
 pub fn create_image_views(
-  swap_chain_images: &[vk::Image],
+  swap_chain_extension: &extensions::khr::Swapchain,
   swap_chain_structures: &VulkanSwapChainStructures,
   logical_device: &Device,
 ) -> Vec<vk::ImageView> {
+  let swap_chain_images = unsafe {
+    swap_chain_extension
+      .get_swapchain_images(swap_chain_structures.swap_chain)
+      .expect("Could not get images out of swapchain")
+  };
+
   swap_chain_images
     .iter()
     .map(|&image| {
@@ -1079,7 +1093,7 @@ mod tests {
     let events_loop = EventsLoop::new();
     let window = WindowBuilder::new()
       .with_title("Test Title")
-      .with_dimensions(LogicalSize::new(f64::from(WIDTH), f64::from(HEIGHT)))
+      .with_dimensions(LogicalSize::new(f64::from(800), f64::from(600)))
       .with_resizable(false)
       .build(&events_loop)
       .expect("Error Creating Window");
