@@ -746,13 +746,10 @@ pub fn create_graphics_pipeline(
     // END SHADER SETUP.
 
     // BEGIN FIXED FUNCTION SETUP.
-    // Set up vertex input state.  This defines stuff like stride etc I think.
-    // For this part of the tutirial we're going through, the vertex data is inside
-    // the shader as a global, So there will be no vertex buffer, so we'll fill
-    // this in in a way to indicate there's no vertex data.
+    // Load color/vertex combinations.
     let vertex_input_state_create_info = vk::PipelineVertexInputStateCreateInfo::builder()
-      .vertex_binding_descriptions(&[])
-      .vertex_attribute_descriptions(&[])
+      .vertex_binding_descriptions(&[ColoredVertex::get_binding_description()])
+      .vertex_attribute_descriptions(&ColoredVertex::get_attribute_descriptions())
       .build();
 
     // Input assembly, what kind of primitive geometry (triangles etc), should
@@ -1008,71 +1005,6 @@ pub fn create_sync_objects(logical_device: &Device) -> VulkanSynchronization {
       image_available_sems: create_sems(logical_device),
       render_finished_sems: create_sems(logical_device),
       in_flight_fences: create_fences(logical_device),
-    }
-  }
-}
-
-pub fn setup_command_buffers(vulkan_context: &VulkanContextInner) {
-  for i in 0..vulkan_context.command_structures.command_buffers.len() {
-    let begin_info = vk::CommandBufferBeginInfo::builder()
-      .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE) // Resubmit allowed while pending execution.
-      .build();
-
-    unsafe {
-      vulkan_context
-        .logical_device
-        .begin_command_buffer(
-          vulkan_context.command_structures.command_buffers[i],
-          &begin_info,
-        )
-        .expect("Could not begin command buffer");
-    }
-
-    let clear_color = vk::ClearValue {
-      color: vk::ClearColorValue {
-        float32: [0f32, 0f32, 0f32, 1f32],
-      },
-    };
-
-    let render_pass_info = vk::RenderPassBeginInfo::builder()
-      .render_pass(vulkan_context.pipeline_structures.render_pass)
-      .framebuffer(vulkan_context.swap_chain_framebuffers[i])
-      .render_area(vk::Rect2D {
-        offset: vk::Offset2D { x: 0, y: 0 },
-        extent: vulkan_context.swap_chain_structures.swap_chain_extent,
-      })
-      .clear_values(&[clear_color])
-      .build();
-
-    unsafe {
-      vulkan_context.logical_device.cmd_begin_render_pass(
-        vulkan_context.command_structures.command_buffers[i],
-        &render_pass_info,
-        vk::SubpassContents::INLINE,
-      );
-
-      vulkan_context.logical_device.cmd_bind_pipeline(
-        vulkan_context.command_structures.command_buffers[i],
-        vk::PipelineBindPoint::GRAPHICS,
-        vulkan_context.pipeline_structures.graphics_pipeline,
-      );
-
-      vulkan_context.logical_device.cmd_draw(
-        vulkan_context.command_structures.command_buffers[i],
-        3,
-        1,
-        0,
-        0,
-      );
-
-      vulkan_context
-        .logical_device
-        .cmd_end_render_pass(vulkan_context.command_structures.command_buffers[i]);
-
-      vulkan_context
-        .logical_device
-        .end_command_buffer(vulkan_context.command_structures.command_buffers[i])
-        .expect("Failed to record command buffer!");
     }
   }
 }

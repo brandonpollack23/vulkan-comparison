@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate memoffset;
+
 mod hello_triangle_application;
 
 use crate::hello_triangle_application::HelloTriangleApplication;

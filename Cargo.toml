@@ -8,4 +8,8 @@ edition = "2018"
 ash = ""
 winit = ""
 winapi = ""
+memoffset = ""
 
+[dependencies.cgmath]
+version = ""
+features = ["swizzle"]

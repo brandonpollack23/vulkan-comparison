@@ -1,7 +1,11 @@
 pub mod raw_vulkan_helpers;
 mod vulkan;
 
+use self::vulkan::vulkan_structures::*;
+use self::vulkan::ColoredVertex;
 use self::vulkan::VulkanContext;
+use ash::vk;
+use cgmath::{Vector2, Vector3};
 use std::str;
 use winit::{dpi::LogicalSize, Event, EventsLoop, Window, WindowBuilder, WindowEvent};
 
@@ -10,10 +14,48 @@ pub struct HelloTriangleApplication {
   window: Window,
   events_loop: EventsLoop,
   vulkan_context: VulkanContext,
+  vertex_buffer: VulkanVertexBuffer,
+  offsets: (u32, Vec<vk::DeviceSize>),
 }
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
+
+const COLORED_VERTICES: [ColoredVertex; 3] = [
+  ColoredVertex {
+    position: Vector2 {
+      x: 0.0f32,
+      y: -0.5f32,
+    },
+    color: Vector3 {
+      x: 1.0f32,
+      y: 0.0f32,
+      z: 0.0f32,
+    },
+  },
+  ColoredVertex {
+    position: Vector2 {
+      x: 0.5f32,
+      y: 0.5f32,
+    },
+    color: Vector3 {
+      x: 0.0f32,
+      y: 1.0f32,
+      z: 0.0f32,
+    },
+  },
+  ColoredVertex {
+    position: Vector2 {
+      x: -0.5f32,
+      y: 0.5f32,
+    },
+    color: Vector3 {
+      x: 0.0f32,
+      y: 0.0f32,
+      z: 1.0f32,
+    },
+  },
+];
 
 // TODO make title, width, height params.
 impl HelloTriangleApplication {
@@ -30,12 +72,17 @@ impl HelloTriangleApplication {
     // Swallow initial resize event.
     events_loop.poll_events(|ev| {});
 
-    let vulkan_structures = VulkanContext::initialize_vulkan(&window);
+    let mut vulkan_context = VulkanContext::initialize_vulkan(&window);
+    let vertex_buffer = vulkan_context.load_colored_vertices(&COLORED_VERTICES[..]);
+    let offsets = (3u32, vec![0]);
+    vulkan_context.setup_command_buffers(&[vertex_buffer.vertex_buffer], &offsets);
 
     Self {
       window,
       events_loop,
-      vulkan_context: vulkan_structures,
+      vulkan_context,
+      vertex_buffer,
+      offsets,
     }
   }
 
@@ -46,6 +93,8 @@ impl HelloTriangleApplication {
 
     let window = &self.window;
     let vulkan_context = &mut self.vulkan_context;
+    let vertex_buffer = &mut self.vertex_buffer;
+    let offsets = &mut self.offsets;
 
     while !done {
       self.events_loop.poll_events(|ev| match ev {
@@ -54,7 +103,7 @@ impl HelloTriangleApplication {
           ..
         } => {
           done = true;
-        },
+        }
         Event::WindowEvent {
           event: WindowEvent::Resized(new_size),
           ..
@@ -65,13 +114,16 @@ impl HelloTriangleApplication {
           } else {
             enable_draw = true;
           }
+
           resized = true;
-        },
+        }
         _ => (),
       });
 
       if enable_draw {
-        vulkan_context.draw_frame(window, &mut resized);
+        if vulkan_context.draw_frame(window, &mut resized) {
+          vulkan_context.setup_command_buffers(&[vertex_buffer.vertex_buffer], offsets);
+        }
       }
     }
 

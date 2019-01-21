@@ -1,8 +1,10 @@
-use crate::hello_triangle_application::raw_vulkan_helpers;
-use crate::hello_triangle_application::vulkan::initialization_helpers::*;
+use super::initialization_helpers::*;
+use super::vulkan_structures::*;
+use ash::util::Align;
 use ash::{extensions, version::DeviceV1_0, version::InstanceV1_0, vk, Device, Entry, Instance};
+use cgmath::{Vector2, Vector3};
+use std::mem::align_of;
 use winit::{dpi::LogicalSize, Window};
-
 pub struct VulkanContext {
   inner: VulkanContextInner,
 }
@@ -24,6 +26,8 @@ pub struct VulkanContextInner {
   pub command_structures: VulkanCommandStructures,
   pub synchronization: VulkanSynchronization,
   pub in_flight_frame_index: usize,
+  pub buffer_allocations: Vec<vk::Buffer>,
+  pub memory_allocations: Vec<vk::DeviceMemory>,
 }
 
 // Each extension is wrapped in it's own struct with it's created structures to
@@ -72,6 +76,13 @@ pub struct VulkanSynchronization {
 impl Drop for VulkanContextInner {
   fn drop(&mut self) {
     unsafe {
+      self.buffer_allocations.iter().for_each(|&buffer| {
+        self.logical_device.destroy_buffer(buffer, None);
+      });
+      self.memory_allocations.iter().for_each(|&memory| {
+        self.logical_device.free_memory(memory, None);
+      });
+
       cleanup_swap_chain(self);
 
       self
@@ -226,16 +237,96 @@ impl VulkanContext {
       command_structures,
       synchronization: semaphores,
       in_flight_frame_index: 0,
+      buffer_allocations: Vec::new(),
+      memory_allocations: Vec::new(),
     };
-
-    setup_command_buffers(&vulkan_context);
 
     VulkanContext {
       inner: vulkan_context,
     }
   }
 
-  pub fn draw_frame(&mut self, window: &Window, framebuffer_resized: &mut bool) {
+  pub fn setup_command_buffers(
+    &self,
+    buffers: &[vk::Buffer],
+    space_information: &(u32, Vec<vk::DeviceSize>),
+  ) {
+    for i in 0..self.inner.command_structures.command_buffers.len() {
+      let begin_info = vk::CommandBufferBeginInfo::builder()
+        .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE) // Resubmit allowed while pending execution.
+        .build();
+
+      unsafe {
+        self
+          .inner
+          .logical_device
+          .begin_command_buffer(
+            self.inner.command_structures.command_buffers[i],
+            &begin_info,
+          )
+          .expect("Could not begin command buffer");
+      }
+
+      let clear_color = vk::ClearValue {
+        color: vk::ClearColorValue {
+          float32: [0f32, 0f32, 0f32, 1f32],
+        },
+      };
+
+      let render_pass_info = vk::RenderPassBeginInfo::builder()
+        .render_pass(self.inner.pipeline_structures.render_pass)
+        .framebuffer(self.inner.swap_chain_framebuffers[i])
+        .render_area(vk::Rect2D {
+          offset: vk::Offset2D { x: 0, y: 0 },
+          extent: self.inner.swap_chain_structures.swap_chain_extent,
+        })
+        .clear_values(&[clear_color])
+        .build();
+
+      unsafe {
+        self.inner.logical_device.cmd_begin_render_pass(
+          self.inner.command_structures.command_buffers[i],
+          &render_pass_info,
+          vk::SubpassContents::INLINE,
+        );
+
+        self.inner.logical_device.cmd_bind_pipeline(
+          self.inner.command_structures.command_buffers[i],
+          vk::PipelineBindPoint::GRAPHICS,
+          self.inner.pipeline_structures.graphics_pipeline,
+        );
+
+        self.inner.logical_device.cmd_bind_vertex_buffers(
+          self.inner.command_structures.command_buffers[i],
+          0,
+          buffers,
+          &space_information.1,
+        );
+
+        self.inner.logical_device.cmd_draw(
+          self.inner.command_structures.command_buffers[i],
+          space_information.0,
+          1,
+          0,
+          0,
+        );
+
+        self
+          .inner
+          .logical_device
+          .cmd_end_render_pass(self.inner.command_structures.command_buffers[i]);
+
+        self
+          .inner
+          .logical_device
+          .end_command_buffer(self.inner.command_structures.command_buffers[i])
+          .expect("Failed to record command buffer!");
+      }
+    }
+  }
+
+  /// Returns true if the command buffers require reset.
+  pub fn draw_frame(&mut self, window: &Window, framebuffer_resized: &mut bool) -> bool {
     let device = &self.inner.logical_device;
     let synchronization = &self.inner.synchronization;
     let in_flight_frame_index = self.inner.in_flight_frame_index;
@@ -267,7 +358,7 @@ impl VulkanContext {
         Ok(res) => res,
         Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
           self.recreate_swap_chain(window.get_inner_size().unwrap());
-          return;
+          return true;
         }
         Err(_) => panic!("Unable to acquire next image!"),
       };
@@ -315,11 +406,14 @@ impl VulkanContext {
       if should_recreate_swapchain || *framebuffer_resized {
         *framebuffer_resized = false;
         self.recreate_swap_chain(window.get_inner_size().unwrap());
+        return true;
       }
     }
 
     self.inner.in_flight_frame_index =
       (self.inner.in_flight_frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
+
+    false
   }
 
   pub fn wait_for_idle(&self) {
@@ -330,6 +424,101 @@ impl VulkanContext {
         .device_wait_idle()
         .expect("Could not wait for idle!");
     }
+  }
+
+  pub fn load_colored_vertices(&mut self, vertices: &[ColoredVertex]) -> VulkanVertexBuffer {
+    unsafe {
+      // 1 create the buffer
+      let buffer_info = vk::BufferCreateInfo::builder()
+        .size(std::mem::size_of_val(vertices) as u64)
+        .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .build();
+
+      let vertex_buffer = self
+        .inner
+        .logical_device
+        .create_buffer(&buffer_info, None)
+        .expect("Could not create vertex buffer!");
+      self.inner.buffer_allocations.push(vertex_buffer);
+
+      let memory_requirements = self
+        .inner
+        .logical_device
+        .get_buffer_memory_requirements(vertex_buffer);
+
+      // 2 Allocate memory of the correct type for the buffer.
+      let alloc_info = vk::MemoryAllocateInfo::builder()
+        .allocation_size(memory_requirements.size)
+        .memory_type_index(self.find_memory_type(
+          memory_requirements.memory_type_bits,
+          vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ))
+        .build();
+
+      let vertex_buffer_memory = self
+        .inner
+        .logical_device
+        .allocate_memory(&alloc_info, None)
+        .expect("Could not allocate vertex buffer memory!");
+      self.inner.memory_allocations.push(vertex_buffer_memory);
+
+      self
+        .inner
+        .logical_device
+        .bind_buffer_memory(vertex_buffer, vertex_buffer_memory, 0);
+
+      // 3 copy the vertex data into the buffer.
+      let mapped_memory = self
+        .inner
+        .logical_device
+        .map_memory(
+          vertex_buffer_memory,
+          0,
+          buffer_info.size,
+          vk::MemoryMapFlags::default(),
+        )
+        .expect("Could not memory map from device!");
+      let mut memory_slice = Align::new(
+        mapped_memory,
+        align_of::<u32>() as u64,
+        memory_requirements.size,
+      );
+      memory_slice.copy_from_slice(vertices); // Guaranteed to finish because requested HOST_COHERENT memory.
+      self.inner.logical_device.unmap_memory(vertex_buffer_memory);
+
+      VulkanVertexBuffer {
+        vertex_buffer,
+        buffer_index: self.inner.buffer_allocations.len() - 1,
+        memory_index: self.inner.memory_allocations.len() - 1,
+      }
+    }
+  }
+
+  pub fn free_vertex_buffer(&mut self, buffer: &VulkanVertexBuffer) {
+    let vk_buffer = self.inner.buffer_allocations.remove(buffer.buffer_index);
+    let vk_memory = self.inner.memory_allocations.remove(buffer.memory_index);
+    unsafe {
+      self.inner.logical_device.destroy_buffer(vk_buffer, None);
+      self.inner.logical_device.free_memory(vk_memory, None);
+    }
+  }
+
+  unsafe fn find_memory_type(&self, type_filter: u32, properties: vk::MemoryPropertyFlags) -> u32 {
+    let mem_properties = self
+      .inner
+      .instance
+      .get_physical_device_memory_properties(self.inner.physical_device);
+
+    for i in 0..mem_properties.memory_type_count {
+      if (type_filter & (1 << i)) != 0
+        && mem_properties.memory_types[i as usize].property_flags & properties == properties
+      {
+        return i as u32;
+      }
+    }
+
+    panic!("Failed to find suitable memory type!");
   }
 
   unsafe fn recreate_swap_chain(&mut self, new_size: LogicalSize) {
@@ -375,8 +564,6 @@ impl VulkanContext {
       inner.swap_chain_framebuffers.len(),
       command_structures.command_pool,
     );
-
-    setup_command_buffers(inner);
   }
 }
 
@@ -422,4 +609,39 @@ unsafe fn cleanup_swap_chain(vulkan_context_inner: &mut VulkanContextInner) {
   vulkan_context_inner
     .swap_chain_extension
     .destroy_swapchain(vulkan_context_inner.swap_chain_structures.swap_chain, None);
+}
+
+// TODO try f64, set format to R64...
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ColoredVertex {
+  pub position: Vector2<f32>,
+  pub color: Vector3<f32>,
+}
+
+impl ColoredVertex {
+  pub fn get_binding_description() -> vk::VertexInputBindingDescription {
+    vk::VertexInputBindingDescription::builder()
+      .binding(0)
+      .stride(std::mem::size_of::<ColoredVertex>() as u32)
+      .input_rate(vk::VertexInputRate::VERTEX)
+      .build()
+  }
+
+  pub fn get_attribute_descriptions() -> [vk::VertexInputAttributeDescription; 2] {
+    [
+      vk::VertexInputAttributeDescription::builder()
+        .binding(0)
+        .location(0)
+        .format(vk::Format::R32G32_SFLOAT)
+        .offset(offset_of!(ColoredVertex, position) as u32)
+        .build(),
+      vk::VertexInputAttributeDescription::builder()
+        .binding(0)
+        .location(1)
+        .format(vk::Format::R32G32B32_SFLOAT)
+        .offset(offset_of!(ColoredVertex, color) as u32)
+        .build(),
+    ]
+  }
 }
