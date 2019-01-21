@@ -705,7 +705,7 @@ pub fn create_render_pass(
   }
 }
 
-// TODO parameterize, make public?
+// TODO parameterize, make public? use shaderc
 // TODO submodule and functions
 pub fn create_graphics_pipeline(
   logical_device: &Device,

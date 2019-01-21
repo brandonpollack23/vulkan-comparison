@@ -9,6 +9,3 @@ ash = ""
 winit = ""
 winapi = ""
 
-[dependencies.cgmath]
-version = ""
-features = ["swizzle"]
