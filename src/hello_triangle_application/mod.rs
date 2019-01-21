@@ -9,15 +9,6 @@ use cgmath::{Vector2, Vector3};
 use std::str;
 use winit::{dpi::LogicalSize, Event, EventsLoop, Window, WindowBuilder, WindowEvent};
 
-pub struct HelloTriangleApplication {
-  // Window related structures.
-  window: Window,
-  events_loop: EventsLoop,
-  vulkan_context: VulkanContext,
-  vertex_buffer: VulkanVertexBuffer,
-  offsets: (u32, Vec<vk::DeviceSize>),
-}
-
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 
@@ -56,6 +47,17 @@ const COLORED_VERTICES: [ColoredVertex; 3] = [
     },
   },
 ];
+
+pub struct HelloTriangleApplication {
+  // Window related structures.
+  window: Window,
+  events_loop: EventsLoop,
+  vulkan_context: VulkanContext,
+  vertex_buffer: VulkanVertexBuffer,   // TODO make vec?
+  offsets: (u32, Vec<vk::DeviceSize>), /* TODO make a descriptive struct.  This is size of the
+                                        * buffer and the offsets of the buffer (which is 0 atm
+                                        * since there's only one set of data in it) */
+}
 
 // TODO make title, width, height params.
 impl HelloTriangleApplication {
