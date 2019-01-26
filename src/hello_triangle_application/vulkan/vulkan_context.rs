@@ -5,6 +5,11 @@ use ash::{extensions, version::DeviceV1_0, version::InstanceV1_0, vk, Device, En
 use cgmath::{Vector2, Vector3};
 use std::mem::align_of;
 use winit::{dpi::LogicalSize, Window};
+
+// TODO bonus
+// https://vulkan-tutorial.com/Vertex_buffers/Staging_buffer
+// Transfer queue extra work to learn about how resources are shared between queue families.
+
 pub struct VulkanContext {
   inner: VulkanContextInner,
 }
@@ -428,45 +433,7 @@ impl VulkanContext {
 
   pub fn load_colored_vertices(&mut self, vertices: &[ColoredVertex]) -> VulkanVertexBuffer {
     unsafe {
-      // 1 create the buffer
-      let buffer_info = vk::BufferCreateInfo::builder()
-        .size(std::mem::size_of_val(vertices) as u64)
-        .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .build();
-
-      let vertex_buffer = self
-        .inner
-        .logical_device
-        .create_buffer(&buffer_info, None)
-        .expect("Could not create vertex buffer!");
-      self.inner.buffer_allocations.push(vertex_buffer);
-
-      let memory_requirements = self
-        .inner
-        .logical_device
-        .get_buffer_memory_requirements(vertex_buffer);
-
-      // 2 Allocate memory of the correct type for the buffer.
-      let alloc_info = vk::MemoryAllocateInfo::builder()
-        .allocation_size(memory_requirements.size)
-        .memory_type_index(self.find_memory_type(
-          memory_requirements.memory_type_bits,
-          vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        ))
-        .build();
-
-      let vertex_buffer_memory = self
-        .inner
-        .logical_device
-        .allocate_memory(&alloc_info, None)
-        .expect("Could not allocate vertex buffer memory!");
-      self.inner.memory_allocations.push(vertex_buffer_memory);
-
-      self
-        .inner
-        .logical_device
-        .bind_buffer_memory(vertex_buffer, vertex_buffer_memory, 0);
+      let (memory_requirements, vertex_buffer, vertex_buffer_memory) = self.create_buffer(vertices, vk::BufferUsageFlags::VERTEX_BUFFER, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT);
 
       // 3 copy the vertex data into the buffer.
       let mapped_memory = self
@@ -475,16 +442,19 @@ impl VulkanContext {
         .map_memory(
           vertex_buffer_memory,
           0,
-          buffer_info.size,
+          std::mem::size_of_val(vertices) as u64,
           vk::MemoryMapFlags::default(),
         )
         .expect("Could not memory map from device!");
+
       let mut memory_slice = Align::new(
         mapped_memory,
         align_of::<u32>() as u64,
-        memory_requirements.size,
+         memory_requirements.size,
       );
+
       memory_slice.copy_from_slice(vertices); // Guaranteed to finish because requested HOST_COHERENT memory.
+
       self.inner.logical_device.unmap_memory(vertex_buffer_memory);
 
       VulkanVertexBuffer {
@@ -493,6 +463,48 @@ impl VulkanContext {
         memory_index: self.inner.memory_allocations.len() - 1,
       }
     }
+  }
+
+  // TODO clean up return values and also return buffer/memory idices.
+  unsafe fn create_buffer(&mut self, vertices: &[ColoredVertex], buffer_flags: vk::BufferUsageFlags, memory_property_flags: vk::MemoryPropertyFlags) -> (vk::MemoryRequirements, vk::Buffer, vk::DeviceMemory) {
+    // 1 create the buffer
+    let buffer_info = vk::BufferCreateInfo::builder()
+      .size(std::mem::size_of_val(vertices) as u64)
+      .usage(buffer_flags)
+      .sharing_mode(vk::SharingMode::EXCLUSIVE)
+      .build();
+
+    let vertex_buffer = self
+      .inner
+      .logical_device
+      .create_buffer(&buffer_info, None)
+      .expect("Could not create vertex buffer!");
+    self.inner.buffer_allocations.push(vertex_buffer);
+
+    let memory_requirements = self
+      .inner
+      .logical_device
+      .get_buffer_memory_requirements(vertex_buffer);
+
+    // 2 Allocate memory of the correct type for the buffer.
+    let alloc_info = vk::MemoryAllocateInfo::builder()
+      .allocation_size(memory_requirements.size)
+      .memory_type_index(
+        self.find_memory_type(memory_requirements.memory_type_bits, memory_property_flags))
+      .build();
+    let vertex_buffer_memory = self
+      .inner
+      .logical_device
+      .allocate_memory(&alloc_info, None)
+      .expect("Could not allocate vertex buffer memory!");
+    self.inner.memory_allocations.push(vertex_buffer_memory);
+
+    self
+      .inner
+      .logical_device
+      .bind_buffer_memory(vertex_buffer, vertex_buffer_memory, 0);
+
+    (memory_requirements, vertex_buffer, vertex_buffer_memory)
   }
 
   pub fn free_vertex_buffer(&mut self, buffer: &VulkanVertexBuffer) {
