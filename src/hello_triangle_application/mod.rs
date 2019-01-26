@@ -54,9 +54,12 @@ pub struct HelloTriangleApplication {
   events_loop: EventsLoop,
   vulkan_context: VulkanContext,
   vertex_buffer: VulkanVertexBuffer, // TODO make vec?
-  offsets: (u32, Vec<vk::DeviceSize>), /* TODO make a descriptive struct.  This is size of the
-                                      * buffer and the offsets of the buffer (which is 0 atm
-                                      * since there's only one set of data in it) */
+  buffer_size_offset_info: (u32, Vec<vk::DeviceSize>), /* TODO make a descriptive struct.  This
+                                                        * is size of the
+                                                        * buffer and the offsets of the buffer
+                                                        * (which is 0 atm
+                                                        * since there's only one set of data in
+                                                        * it) */
 }
 
 // TODO make title, width, height params.
@@ -76,15 +79,18 @@ impl HelloTriangleApplication {
 
     let mut vulkan_context = VulkanContext::initialize_vulkan(&window);
     let vertex_buffer = vulkan_context.load_colored_vertices(&COLORED_VERTICES[..]);
-    let offsets = (3u32, vec![0]);
-    vulkan_context.setup_command_buffers(&[vertex_buffer.vertex_buffer], &offsets);
+    let buffer_size_offset_info = (3u32, vec![0]);
+    vulkan_context.setup_command_buffers_for_drawing_vertex_buffers(
+      &[vertex_buffer.vertex_buffer],
+      &buffer_size_offset_info,
+    );
 
     Self {
       window,
       events_loop,
       vulkan_context,
       vertex_buffer,
-      offsets,
+      buffer_size_offset_info,
     }
   }
 
@@ -96,7 +102,7 @@ impl HelloTriangleApplication {
     let window = &self.window;
     let vulkan_context = &mut self.vulkan_context;
     let vertex_buffer = &mut self.vertex_buffer;
-    let offsets = &mut self.offsets;
+    let offsets = &mut self.buffer_size_offset_info;
 
     while !done {
       self.events_loop.poll_events(|ev| match ev {
@@ -124,7 +130,10 @@ impl HelloTriangleApplication {
 
       if enable_draw {
         if vulkan_context.draw_frame(window, &mut resized) {
-          vulkan_context.setup_command_buffers(&[vertex_buffer.vertex_buffer], offsets);
+          vulkan_context.setup_command_buffers_for_drawing_vertex_buffers(
+            &[vertex_buffer.vertex_buffer],
+            offsets,
+          );
         }
       }
     }

@@ -252,17 +252,23 @@ impl VulkanContext {
     }
   }
 
-  pub fn setup_command_buffers(
+  pub fn setup_command_buffers_for_drawing_vertex_buffers(
     &self,
     buffers: &[vk::Buffer],
-    space_information: &(u32, Vec<vk::DeviceSize>),
+    buffer_size_offset_info: &(u32, Vec<vk::DeviceSize>),
   ) {
     for i in 0..self.inner.command_structures.command_buffers.len() {
-      let begin_info = vk::CommandBufferBeginInfo::builder()
-        .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE) // Resubmit allowed while pending execution.
-        .build();
+      let clear_color = vk::ClearValue {
+        color: vk::ClearColorValue {
+          float32: [0f32, 0f32, 0f32, 1f32],
+        },
+      };
 
       unsafe {
+        let begin_info = vk::CommandBufferBeginInfo::builder()
+          .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE) // Resubmit allowed while pending execution.
+          .build();
+
         self
           .inner
           .logical_device
@@ -271,25 +277,17 @@ impl VulkanContext {
             &begin_info,
           )
           .expect("Could not begin command buffer");
-      }
 
-      let clear_color = vk::ClearValue {
-        color: vk::ClearColorValue {
-          float32: [0f32, 0f32, 0f32, 1f32],
-        },
-      };
+        let render_pass_info = vk::RenderPassBeginInfo::builder()
+          .render_pass(self.inner.pipeline_structures.render_pass)
+          .framebuffer(self.inner.swap_chain_framebuffers[i])
+          .render_area(vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: self.inner.swap_chain_structures.swap_chain_extent,
+          })
+          .clear_values(&[clear_color])
+          .build();
 
-      let render_pass_info = vk::RenderPassBeginInfo::builder()
-        .render_pass(self.inner.pipeline_structures.render_pass)
-        .framebuffer(self.inner.swap_chain_framebuffers[i])
-        .render_area(vk::Rect2D {
-          offset: vk::Offset2D { x: 0, y: 0 },
-          extent: self.inner.swap_chain_structures.swap_chain_extent,
-        })
-        .clear_values(&[clear_color])
-        .build();
-
-      unsafe {
         self.inner.logical_device.cmd_begin_render_pass(
           self.inner.command_structures.command_buffers[i],
           &render_pass_info,
@@ -306,12 +304,12 @@ impl VulkanContext {
           self.inner.command_structures.command_buffers[i],
           0,
           buffers,
-          &space_information.1,
+          &buffer_size_offset_info.1,
         );
 
         self.inner.logical_device.cmd_draw(
           self.inner.command_structures.command_buffers[i],
-          space_information.0,
+          buffer_size_offset_info.0,
           1,
           0,
           0,
@@ -466,7 +464,11 @@ impl VulkanContext {
     }
   }
 
-  // TODO clean up return values and also return buffer/memory idices.
+  // TODO do not do individual allocations, use VulkanMemoryAllocator equivalent.
+  // I can only allocate a max of maxMemoryAllocationCount, you're not meant to
+  // offload all these allocations heavy lifting on the driver, but allocate large
+  // buffers to draw from. TODO clean up return values and also return
+  // buffer/memory idices.
   unsafe fn create_buffer(
     &mut self,
     size: u64,
