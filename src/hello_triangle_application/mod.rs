@@ -53,10 +53,10 @@ pub struct HelloTriangleApplication {
   window: Window,
   events_loop: EventsLoop,
   vulkan_context: VulkanContext,
-  vertex_buffer: VulkanVertexBuffer,   // TODO make vec?
+  vertex_buffer: VulkanVertexBuffer, // TODO make vec?
   offsets: (u32, Vec<vk::DeviceSize>), /* TODO make a descriptive struct.  This is size of the
-                                        * buffer and the offsets of the buffer (which is 0 atm
-                                        * since there's only one set of data in it) */
+                                      * buffer and the offsets of the buffer (which is 0 atm
+                                      * since there's only one set of data in it) */
 }
 
 // TODO make title, width, height params.
@@ -72,7 +72,7 @@ impl HelloTriangleApplication {
       .expect("Error Creating Window");
 
     // Swallow initial resize event.
-    events_loop.poll_events(|ev| {});
+    events_loop.poll_events(|_ev| {});
 
     let mut vulkan_context = VulkanContext::initialize_vulkan(&window);
     let vertex_buffer = vulkan_context.load_colored_vertices(&COLORED_VERTICES[..]);

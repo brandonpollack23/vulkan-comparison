@@ -8,7 +8,8 @@ use winit::{dpi::LogicalSize, Window};
 
 // TODO bonus
 // https://vulkan-tutorial.com/Vertex_buffers/Staging_buffer
-// Transfer queue extra work to learn about how resources are shared between queue families.
+// Transfer queue extra work to learn about how resources are shared between
+// queue families.
 
 pub struct VulkanContext {
   inner: VulkanContextInner,
@@ -433,43 +434,48 @@ impl VulkanContext {
 
   pub fn load_colored_vertices(&mut self, vertices: &[ColoredVertex]) -> VulkanVertexBuffer {
     unsafe {
-      let (memory_requirements, vertex_buffer, vertex_buffer_memory) = self.create_buffer(vertices, vk::BufferUsageFlags::VERTEX_BUFFER, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT);
-
-      // 3 copy the vertex data into the buffer.
-      let mapped_memory = self
-        .inner
-        .logical_device
-        .map_memory(
-          vertex_buffer_memory,
-          0,
-          std::mem::size_of_val(vertices) as u64,
-          vk::MemoryMapFlags::default(),
-        )
-        .expect("Could not memory map from device!");
-
-      let mut memory_slice = Align::new(
-        mapped_memory,
-        align_of::<u32>() as u64,
-         memory_requirements.size,
+      let buffer_size = std::mem::size_of_val(vertices) as u64;
+      // 1 create the buffer
+      // 2 Allocate memory of the correct type for the buffer.
+      let (memory_requirements, staging_buffer, vertex_buffer_memory) = self.create_buffer(
+        buffer_size,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
       );
 
-      memory_slice.copy_from_slice(vertices); // Guaranteed to finish because requested HOST_COHERENT memory.
+      // 3 copy the vertex data into the staging buffer.
+      self.copy_data_to_gpu_memory(vertices, vertex_buffer_memory, memory_requirements.size);
 
-      self.inner.logical_device.unmap_memory(vertex_buffer_memory);
+      // 4 allocate the actual vertex buffer.
+      let (_, vertex_buffer, _) = self.create_buffer(
+        buffer_size,
+        vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+      );
 
+      // Copy stuff from staging to vertex buffer.
+      self.copy_buffer(staging_buffer, vertex_buffer, buffer_size);
+
+      let num_buffers = self.inner.buffer_allocations.len();
+      let num_memory_allocations = self.inner.memory_allocations.len();
       VulkanVertexBuffer {
         vertex_buffer,
-        buffer_index: self.inner.buffer_allocations.len() - 1,
-        memory_index: self.inner.memory_allocations.len() - 1,
+        buffer_indices: vec![num_buffers - 1, num_buffers - 2],
+        memory_indices: vec![num_memory_allocations - 1, num_memory_allocations - 2],
       }
     }
   }
 
   // TODO clean up return values and also return buffer/memory idices.
-  unsafe fn create_buffer(&mut self, vertices: &[ColoredVertex], buffer_flags: vk::BufferUsageFlags, memory_property_flags: vk::MemoryPropertyFlags) -> (vk::MemoryRequirements, vk::Buffer, vk::DeviceMemory) {
-    // 1 create the buffer
+  unsafe fn create_buffer(
+    &mut self,
+    size: u64,
+    buffer_flags: vk::BufferUsageFlags,
+    memory_property_flags: vk::MemoryPropertyFlags,
+  ) -> (vk::MemoryRequirements, vk::Buffer, vk::DeviceMemory) {
+    // create the buffer
     let buffer_info = vk::BufferCreateInfo::builder()
-      .size(std::mem::size_of_val(vertices) as u64)
+      .size(size as u64)
       .usage(buffer_flags)
       .sharing_mode(vk::SharingMode::EXCLUSIVE)
       .build();
@@ -486,11 +492,12 @@ impl VulkanContext {
       .logical_device
       .get_buffer_memory_requirements(vertex_buffer);
 
-    // 2 Allocate memory of the correct type for the buffer.
+    // Allocate memory of the correct type for the buffer.
     let alloc_info = vk::MemoryAllocateInfo::builder()
       .allocation_size(memory_requirements.size)
       .memory_type_index(
-        self.find_memory_type(memory_requirements.memory_type_bits, memory_property_flags))
+        self.find_memory_type(memory_requirements.memory_type_bits, memory_property_flags),
+      )
       .build();
     let vertex_buffer_memory = self
       .inner
@@ -507,12 +514,117 @@ impl VulkanContext {
     (memory_requirements, vertex_buffer, vertex_buffer_memory)
   }
 
+  unsafe fn copy_data_to_gpu_memory<T: Copy>(
+    &self,
+    data_to_copy: &[T],
+    gpu_memory: vk::DeviceMemory,
+    size: vk::DeviceSize,
+  ) {
+    let mapped_memory = self
+      .inner
+      .logical_device
+      .map_memory(
+        gpu_memory,
+        0,
+        std::mem::size_of_val(data_to_copy) as u64,
+        vk::MemoryMapFlags::default(),
+      )
+      .expect("Could not memory map from device!");
+
+    let mut memory_slice = Align::new(mapped_memory, align_of::<u32>() as u64, size);
+
+    memory_slice.copy_from_slice(data_to_copy); // Guaranteed to finish because requested HOST_COHERENT memory.
+
+    self.inner.logical_device.unmap_memory(gpu_memory);
+  }
+
+  // TODO consider making a seperate command pool for allocating thsee buffers
+  // with TRANSIENT bit set, this allows the vulkan implementation to make
+  // optimizations on allocation. TRANSIENT would tell the implementation the
+  // buffer is short lived.
+  unsafe fn copy_buffer(
+    &self,
+    source_buffer: vk::Buffer,
+    destination_buffer: vk::Buffer,
+    buffer_size: u64,
+  ) {
+    let alloc_info = vk::CommandBufferAllocateInfo::builder()
+      .level(vk::CommandBufferLevel::PRIMARY)
+      .command_pool(self.inner.command_structures.command_pool)
+      .command_buffer_count(1)
+      .build();
+
+    let command_buffer = self
+      .inner
+      .logical_device
+      .allocate_command_buffers(&alloc_info)
+      .unwrap()[0];
+
+    let command_begin_info = vk::CommandBufferBeginInfo::builder()
+      .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT) // Only doing this one time and blocking on returning until done.
+      .build();
+
+    // BEGIN BUFFER COMMANDS
+    self
+      .inner
+      .logical_device
+      .begin_command_buffer(command_buffer, &command_begin_info);
+
+    let copy_region = vk::BufferCopy::builder()
+      .src_offset(0)
+      .dst_offset(0)
+      .size(buffer_size as vk::DeviceSize)
+      .build();
+
+    self.inner.logical_device.cmd_copy_buffer(
+      command_buffer,
+      source_buffer,
+      destination_buffer,
+      &[copy_region],
+    );
+
+    self.inner.logical_device.end_command_buffer(command_buffer);
+    // END BUFFER COMMANDS
+
+    // Submit the commands.
+    // TODO consider not blocking and making a fence instead of waiting for idle?
+    let submit_info = vk::SubmitInfo::builder()
+      .command_buffers(&[command_buffer])
+      .build();
+    self.inner.logical_device.queue_submit(
+      self.inner.graphics_queue,
+      &[submit_info],
+      vk::Fence::null(),
+    );
+    self
+      .inner
+      .logical_device
+      .queue_wait_idle(self.inner.graphics_queue);
+
+    self.inner.logical_device.free_command_buffers(
+      self.inner.command_structures.command_pool,
+      &[command_buffer],
+    );
+  }
+
   pub fn free_vertex_buffer(&mut self, buffer: &VulkanVertexBuffer) {
-    let vk_buffer = self.inner.buffer_allocations.remove(buffer.buffer_index);
-    let vk_memory = self.inner.memory_allocations.remove(buffer.memory_index);
+    let buffers_to_remove: Vec<vk::Buffer> = buffer
+      .buffer_indices
+      .iter()
+      .map(|&index| self.inner.buffer_allocations.remove(index))
+      .collect();
+    let memory_allocations_to_remove: Vec<vk::DeviceMemory> = buffer
+      .memory_indices
+      .iter()
+      .map(|&index| self.inner.memory_allocations.remove(index))
+      .collect();
     unsafe {
-      self.inner.logical_device.destroy_buffer(vk_buffer, None);
-      self.inner.logical_device.free_memory(vk_memory, None);
+      buffers_to_remove
+        .iter()
+        .for_each(|&buffer| self.inner.logical_device.destroy_buffer(buffer, None));
+      memory_allocations_to_remove
+        .iter()
+        .for_each(|&memory| self.inner.logical_device.free_memory(memory, None));
     }
   }
 
