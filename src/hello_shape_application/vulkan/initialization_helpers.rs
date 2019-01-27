@@ -1,6 +1,6 @@
 use super::vulkan_context::*;
 use super::TITLE_BYTES;
-use crate::hello_triangle_application::raw_vulkan_helpers;
+use crate::hello_shape_application::raw_vulkan_helpers;
 use ash::util::*;
 use ash::{
   extensions,

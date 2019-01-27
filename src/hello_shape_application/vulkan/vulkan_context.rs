@@ -252,11 +252,16 @@ impl VulkanContext {
     }
   }
 
-  pub fn setup_command_buffers_for_drawing_vertex_buffers(
+  pub fn setup_command_buffers_for_drawing_vertex_buffers<T>(
     &self,
-    buffers: &[vk::Buffer],
+    vertex_buffers: &[vk::Buffer],
+    index_buffer_size_tuple: T,
     buffer_size_offset_info: &(u32, Vec<vk::DeviceSize>),
-  ) {
+  ) where
+    Option<(vk::Buffer, u32)>: From<T>,
+  {
+    let ibst = Option::from(index_buffer_size_tuple);
+
     for i in 0..self.inner.command_structures.command_buffers.len() {
       let clear_color = vk::ClearValue {
         color: vk::ClearColorValue {
@@ -303,17 +308,35 @@ impl VulkanContext {
         self.inner.logical_device.cmd_bind_vertex_buffers(
           self.inner.command_structures.command_buffers[i],
           0,
-          buffers,
+          vertex_buffers,
           &buffer_size_offset_info.1,
         );
 
-        self.inner.logical_device.cmd_draw(
-          self.inner.command_structures.command_buffers[i],
-          buffer_size_offset_info.0,
-          1,
-          0,
-          0,
-        );
+        // TODO one index buffer per vertex buffers? Probly offset.
+        if ibst.is_some() {
+          self.inner.logical_device.cmd_bind_index_buffer(
+            self.inner.command_structures.command_buffers[i],
+            ibst.unwrap().0,
+            0,
+            vk::IndexType::UINT32,
+          );
+          self.inner.logical_device.cmd_draw_indexed(
+            self.inner.command_structures.command_buffers[i],
+            ibst.unwrap().1,
+            1,
+            0,
+            0,
+            0,
+          );
+        } else {
+          self.inner.logical_device.cmd_draw(
+            self.inner.command_structures.command_buffers[i],
+            buffer_size_offset_info.0,
+            1,
+            0,
+            0,
+          );
+        }
 
         self
           .inner
@@ -430,38 +453,125 @@ impl VulkanContext {
     }
   }
 
-  pub fn load_colored_vertices(&mut self, vertices: &[ColoredVertex]) -> VulkanVertexBuffer {
+  pub fn load_colored_vertices<'a, T>(
+    &mut self,
+    vertices: &[ColoredVertex],
+    indices: T,
+  ) -> VulkanVertexBuffer
+  where
+    Option<&'a [u32]>: From<T>,
+  {
     unsafe {
-      let buffer_size = std::mem::size_of_val(vertices) as u64;
-      // 1 create the buffer
-      // 2 Allocate memory of the correct type for the buffer.
-      let (memory_requirements, staging_buffer, vertex_buffer_memory) = self.create_buffer(
-        buffer_size,
-        vk::BufferUsageFlags::TRANSFER_SRC,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-      );
+      let mut buffer_indices = Vec::with_capacity(2);
+      let mut memory_indices = Vec::with_capacity(2);
+      // First create the Vertex buffer.
+      let (vertex_buffer, vertex_buffer_index, vertex_memory_index) =
+        self.create_vertex_buffer_with_staging(vertices);
+      buffer_indices.push(vertex_buffer_index);
+      memory_indices.push(vertex_memory_index);
 
-      // 3 copy the vertex data into the staging buffer.
-      self.copy_data_to_gpu_memory(vertices, vertex_buffer_memory, memory_requirements.size);
+      // Now create index buffer, if needed.
+      let index_buffer;
+      let some_indices = Option::from(indices);
+      if some_indices.is_some() {
+        let (index_buffer_, index_buffer_index, index_memory_index) =
+          some_indices.map(|i| self.create_index_buffer(i)).unwrap();
+        buffer_indices.push(vertex_buffer_index);
+        memory_indices.push(vertex_memory_index);
+        index_buffer = Some(index_buffer_);
+      } else {
+        index_buffer = None;
+      }
 
-      // 4 allocate the actual vertex buffer.
-      let (_, vertex_buffer, _) = self.create_buffer(
-        buffer_size,
-        vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
-        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-      );
-
-      // Copy stuff from staging to vertex buffer.
-      self.copy_buffer(staging_buffer, vertex_buffer, buffer_size);
-
-      let num_buffers = self.inner.buffer_allocations.len();
-      let num_memory_allocations = self.inner.memory_allocations.len();
       VulkanVertexBuffer {
         vertex_buffer,
-        buffer_indices: vec![num_buffers - 1, num_buffers - 2],
-        memory_indices: vec![num_memory_allocations - 1, num_memory_allocations - 2],
+        index_buffer,
+        buffer_indices,
+        memory_indices,
       }
     }
+  }
+
+  /// Loads a staging buffer with the data and copies it over to a vertex
+  /// buffer. Returns the Vertex buffer for drawing commands, the buffer
+  /// indicex for cleanup, and the memory allocation indicex for cleanup.
+  unsafe fn create_vertex_buffer_with_staging(
+    &mut self,
+    vertices: &[ColoredVertex],
+  ) -> (vk::Buffer, usize, usize) {
+    let buffer_size = std::mem::size_of_val(vertices) as u64;
+    // 1 create the buffer
+    // 2 Allocate memory of the correct type for the buffer.
+    let (memory_requirements, staging_buffer, vertex_buffer_memory) = self.create_buffer(
+      buffer_size,
+      vk::BufferUsageFlags::TRANSFER_SRC,
+      vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    );
+    let staging_buffer_index = self.inner.buffer_allocations.len() - 1;
+    let staging_memory_index = self.inner.memory_allocations.len() - 1;
+
+    // 3 copy the vertex data into the staging buffer.
+    self.copy_data_to_gpu_memory(vertices, vertex_buffer_memory, memory_requirements.size);
+    // 4 allocate the actual vertex buffer.
+    let (_, vertex_buffer, _) = self.create_buffer(
+      buffer_size,
+      vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+      vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    );
+    let vertex_buffer_index = self.inner.buffer_allocations.len() - 1;
+    let vertex_memory_index = self.inner.memory_allocations.len() - 1;
+
+    // Copy stuff from staging to vertex buffer.
+    self.copy_buffer(staging_buffer, vertex_buffer, buffer_size);
+
+    // TODO don't add tehse to the managment vec in the first place.
+    // Clean up staging buffer/memory
+    self.inner.buffer_allocations.remove(staging_buffer_index);
+    let staging_memory = self.inner.memory_allocations.remove(staging_memory_index);
+    self
+      .inner
+      .logical_device
+      .destroy_buffer(staging_buffer, None);
+    self.inner.logical_device.free_memory(staging_memory, None);
+
+    (vertex_buffer, vertex_buffer_index, vertex_memory_index)
+  }
+
+  /// Returns index buffer, buffer index, allocation index.
+  unsafe fn create_index_buffer(&mut self, indices: &[u32]) -> (vk::Buffer, usize, usize) {
+    let buffer_size = std::mem::size_of_val(indices) as u64;
+
+    let (memory_requirements, staging_buffer, index_buffer_memory) = self.create_buffer(
+      buffer_size,
+      vk::BufferUsageFlags::TRANSFER_SRC,
+      vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    );
+    let staging_buffer_index = self.inner.buffer_allocations.len() - 1;
+    let staging_memory_index = self.inner.memory_allocations.len() - 1;
+
+    self.copy_data_to_gpu_memory(indices, index_buffer_memory, buffer_size);
+
+    let (_, index_buffer, _) = self.create_buffer(
+      buffer_size,
+      vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER,
+      vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    );
+    let index_buffer_index = self.inner.buffer_allocations.len() - 1;
+    let index_memory_index = self.inner.memory_allocations.len() - 1;
+
+    self.copy_buffer(staging_buffer, index_buffer, buffer_size);
+
+    // TODO don't add tehse to the managment vec in the first place.
+    // Clean up staging buffer/memory
+    self.inner.buffer_allocations.remove(staging_buffer_index);
+    let staging_memory = self.inner.memory_allocations.remove(staging_memory_index);
+    self
+      .inner
+      .logical_device
+      .destroy_buffer(staging_buffer, None);
+    self.inner.logical_device.free_memory(staging_memory, None);
+
+    (index_buffer, index_buffer_index, index_memory_index)
   }
 
   // TODO do not do individual allocations, use VulkanMemoryAllocator equivalent.
